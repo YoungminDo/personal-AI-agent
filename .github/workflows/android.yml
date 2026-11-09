@@ -1,0 +1,54 @@
+name: Android test build
+
+on:
+  push:
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Engine tests and debug APK
+        run: ./gradlew :engine:test :app:assembleDebug --stacktrace
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: parking-memo-test-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publish test release (phone-friendly download link)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="test-apk-latest"
+          cp app/build/outputs/apk/debug/app-debug.apk parking-memo-test.apk
+          NOTES="Test build from ${GITHUB_REF_NAME} @ ${GITHUB_SHA::7} (run ${GITHUB_RUN_NUMBER}). Install over the previous build; records and logs are kept."
+          gh release delete "$TAG" --yes --cleanup-tag || true
+          gh release create "$TAG" parking-memo-test.apk \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "파킹메모 테스트 빌드 (run ${GITHUB_RUN_NUMBER})" \
+            --notes "$NOTES"
