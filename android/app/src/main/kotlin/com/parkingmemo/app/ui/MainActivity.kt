@@ -3,7 +3,16 @@ package com.parkingmemo.app.ui
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.ui.Modifier
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -22,9 +31,26 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Android 15 draws apps edge to edge; keep light icons on the dark bars
+        // and pad every screen by the system bar / cutout insets below.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+        )
         super.onCreate(savedInstanceState)
         handle(intent)
-        setContent { ParkingTheme { AppRoot() } }
+        setContent {
+            ParkingTheme {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(Bg)
+                        .windowInsetsPadding(WindowInsets.safeDrawing),
+                ) {
+                    AppRoot()
+                }
+            }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
