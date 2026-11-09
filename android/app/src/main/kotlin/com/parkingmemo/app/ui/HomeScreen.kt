@@ -48,7 +48,7 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 @Composable
-fun HomeScreen(onStartGuide: () -> Unit, onOpenSetup: () -> Unit) {
+fun HomeScreen(onStartGuide: () -> Unit, onOpenSetup: () -> Unit, onOpenSensors: () -> Unit) {
     val ctx = LocalContext.current
     val app = ctx.applicationContext as ParkingApp
     val status by TrackerState.status.collectAsState()
@@ -112,6 +112,9 @@ fun HomeScreen(onStartGuide: () -> Unit, onOpenSetup: () -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("하차 기록 끝내기 (도착했어요)") }
         }
+        OutlinedButton(onClick = onOpenSensors, modifier = Modifier.fillMaxWidth()) {
+            Text("센서 확인 (기압·걸음·방향·GPS)")
+        }
         OutlinedButton(onClick = { shareLogs(ctx, app) }, modifier = Modifier.fillMaxWidth()) {
             Text("기록 파일 내보내기")
         }
@@ -123,6 +126,7 @@ fun HomeScreen(onStartGuide: () -> Unit, onOpenSetup: () -> Unit) {
             })
         }
         TextButton(onClick = onOpenSetup) { Text("설정 다시 하기") }
+        Text("버전 ${appVersion(ctx)}", color = Muted, fontSize = 12.sp)
     }
 
     if (showPicker) {
@@ -227,6 +231,12 @@ fun FloorPicker(current: String?, onPick: (String) -> Unit, onDismiss: () -> Uni
             }
         },
     )
+}
+
+private fun appVersion(ctx: Context): String = try {
+    ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "?"
+} catch (e: Exception) {
+    "?"
 }
 
 private fun shareLogs(ctx: Context, app: ParkingApp) {

@@ -40,7 +40,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Screen { SETUP, HOME, GUIDE }
+private enum class Screen { SETUP, HOME, GUIDE, SENSORS }
 
 @Composable
 fun AppRoot() {
@@ -71,7 +71,9 @@ fun AppRoot() {
                 screen = Screen.GUIDE
             },
             onOpenSetup = { screen = Screen.SETUP },
+            onOpenSensors = { screen = Screen.SENSORS },
         )
+        Screen.SENSORS -> SensorCheckScreen(onBack = { screen = Screen.HOME })
         Screen.GUIDE -> GuideScreen(
             onFound = { TrackerService.send(ctx, TrackerService.ACTION_FOUND) },
             onClose = {

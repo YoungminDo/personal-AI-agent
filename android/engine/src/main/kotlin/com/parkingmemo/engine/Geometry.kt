@@ -13,6 +13,12 @@ data class Vec2(val x: Double, val y: Double) {
     operator fun unaryMinus() = Vec2(-x, -y)
     fun norm(): Double = hypot(x, y)
 
+    /** Rotates the vector so its bearing increases by [deg] (clockwise, compass sense). */
+    fun rotatedBy(deg: Double): Vec2 {
+        val r = Math.toRadians(deg)
+        return Vec2(x * cos(r) + y * sin(r), -x * sin(r) + y * cos(r))
+    }
+
     /** Compass bearing in degrees: 0 = north (+y), 90 = east (+x). */
     fun bearingDeg(): Double = normDeg(Math.toDegrees(atan2(x, y)))
 
@@ -78,6 +84,25 @@ class CircularEma(private val alpha: Double) {
 
     val value: Double?
         get() = if (initialised) normDeg(Math.toDegrees(atan2(s, c))) else null
+}
+
+/** Angle in degrees between two 3D vectors. */
+fun angleBetweenDeg(a: DoubleArray, b: DoubleArray): Double {
+    val dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    val na = kotlin.math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2])
+    val nb = kotlin.math.sqrt(b[0] * b[0] + b[1] * b[1] + b[2] * b[2])
+    if (na < 1e-9 || nb < 1e-9) return 0.0
+    return Math.toDegrees(kotlin.math.acos((dot / (na * nb)).coerceIn(-1.0, 1.0)))
+}
+
+/** A GNSS position used for open-air parking (F05). */
+data class GeoFix(val lat: Double, val lon: Double, val accuracyM: Double) {
+    /** Local east/north offset in metres from this fix to [to] (fine for a few km). */
+    fun vectorTo(to: GeoFix): Vec2 {
+        val dx = (to.lon - lon) * cos(Math.toRadians(lat)) * 111_320.0
+        val dy = (to.lat - lat) * 110_540.0
+        return Vec2(dx, dy)
+    }
 }
 
 object Heading {

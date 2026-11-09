@@ -13,9 +13,12 @@ class Pdr(
     private val stepScale: Double = 1.0,
     private val gridDeg: Double? = null,
     private val snapTolDeg: Double = 15.0,
+    /** Shared with the caller when it also needs the arrow direction. */
+    val tracker: HeadingTracker = HeadingTracker(),
+    private val ownsTracker: Boolean = true,
 ) {
-    private val headingEma = CircularEma(0.35)
     private var lastStepMs = -1L
+    private var lastHeading = 0.0
 
     var pos: Vec2 = Vec2.ZERO
         private set
@@ -23,10 +26,9 @@ class Pdr(
         private set
     val track = mutableListOf<TrackPoint>()
 
-    val headingDeg: Double? get() = headingEma.value
-
-    fun onHeading(deg: Double) {
-        headingEma.push(deg)
+    /** Feeds the heading tracker (ignored when the tracker is fed by the owner). */
+    fun onHeading(tMs: Long, deg: Double, up: DoubleArray? = null) {
+        if (ownsTracker) tracker.onSample(tMs, deg, up)
     }
 
     fun onStep(tMs: Long): Vec2 {
@@ -34,7 +36,8 @@ class Pdr(
         lastStepMs = tMs
         val freq = if (dt in 250L..1500L) 1000.0 / dt else 1.8
         val len = stepLength(freq) * stepScale
-        var h = headingEma.value ?: 0.0
+        var h = tracker.heading(tMs) ?: lastHeading
+        lastHeading = h
         if (gridDeg != null) h = snap(h, gridDeg, snapTolDeg)
         pos += Vec2.fromBearing(h, len)
         distanceM += len

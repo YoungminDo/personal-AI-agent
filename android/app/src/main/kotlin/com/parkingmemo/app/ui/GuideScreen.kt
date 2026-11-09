@@ -154,5 +154,7 @@ private fun debugLine(s: GuideState?): String {
     if (s == null) return ""
     val h = s.hRelCarM?.let { "차보다 %+.1f m".format(it) } ?: "높이 기준 없음"
     val sig = s.sigmaM?.let { " · 오차 약 %.0f m".format(it) } ?: ""
-    return "$h$sig · 등급 ${s.tier}"
+    val ref = s.ref?.let { " · $it" } ?: ""
+    val align = s.alignDeg?.let { if (it != 0.0) " · 방향 보정 %+.0f°".format(it) else "" } ?: ""
+    return "$h$sig · 등급 ${s.tier}$ref$align"
 }

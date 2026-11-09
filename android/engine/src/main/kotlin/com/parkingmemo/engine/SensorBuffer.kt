@@ -1,7 +1,8 @@
 package com.parkingmemo.engine
 
 data class PressureSample(val tMs: Long, val hPa: Double)
-data class HeadingSample(val tMs: Long, val deg: Double)
+/** [up]: gravity direction in device coordinates (detects pocket/hand moves); may be null. */
+class HeadingSample(val tMs: Long, val deg: Double, val up: DoubleArray? = null)
 
 data class GnssSample(
     val tMs: Long,
@@ -28,7 +29,7 @@ class SensorBuffer(private val keepMs: Long = 10 * 60_000L) {
 
     fun addPressure(tMs: Long, hPa: Double) { pressure.addLast(PressureSample(tMs, hPa)); trim(tMs) }
     fun addStep(tMs: Long) { steps.addLast(tMs); trim(tMs) }
-    fun addHeading(tMs: Long, deg: Double) { headings.addLast(HeadingSample(tMs, deg)); trim(tMs) }
+    fun addHeading(tMs: Long, deg: Double, up: DoubleArray? = null) { headings.addLast(HeadingSample(tMs, deg, up)); trim(tMs) }
     fun addGnss(s: GnssSample) { gnss.addLast(s); trim(s.tMs) }
 
     fun pressureMedian(t0: Long, t1: Long): Double? {

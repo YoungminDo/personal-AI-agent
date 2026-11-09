@@ -25,20 +25,25 @@ data class GuideState(
     /** User height relative to the car in metres (debug). */
     val hRelCarM: Double?,
     val sigmaM: Double?,
+    /** Rotation applied by the lift-door alignment, if any (debug). */
+    val alignDeg: Double? = null,
+    /** Which starting-point assumption is in use (debug). */
+    val ref: String? = null,
 )
 
 /**
- * Return-trip guidance (design doc 5.8-5.10).
+ * Return-trip guidance for one starting-point assumption (design doc 5.8-5.10).
  *
- * Vertical: the current height relative to the car is built only from changes
- * measured during this trip plus one stored difference (P1), so overnight
- * weather does not matter. Horizontal: once the user settles on the car floor
- * the anchor is assumed to be the same exit used when leaving, and the stored
- * path is followed back to the car.
+ * Vertical: height relative to the car = change measured on this trip + one stored
+ * difference (P1), so overnight weather does not matter.
+ * Horizontal: once settled on the car floor the user is assumed to be at the same
+ * lift/stair door used when leaving. The first ~3 m walked out of that door is
+ * compared with the stored door direction; if they disagree the stored path is
+ * rotated, which removes any difference in how the phone was carried (D02).
  */
 class Guidance(
     private val rec: ParkingRecord,
-    private val ref: StartRef,
+    val ref: StartRef,
     private val floorH: Double = FloorEstimator.DEFAULT_FLOOR_H,
     private val learned: Boolean = false,
     private val stepScale: Double = 1.0,
@@ -46,17 +51,21 @@ class Guidance(
     enum class StartRef { GROUND, WALK_END }
 
     private val smoother = PressureSmoother()
-    private val segmenter = VerticalSegmenter()
+    // Faster stop detection than on the walk-out: the user is waiting for the arrow.
+    private val segmenter = VerticalSegmenter(stopHoldMs = 1_500)
     private val startSamples = mutableListOf<Double>()
     private var hStart: Double? = null
     private var hNow: Double? = null
-    private val arrowHeading = CircularEma(0.5)
-    private var lastHeadingDeg: Double? = null
+    val tracker = HeadingTracker()
     private var pdr: Pdr? = null
     private var anchored = false
     private var offFloorSinceMs = -1L
     private var wpIdx = 0
     private val recentSteps = ArrayDeque<Long>()
+    private var lastT = 0L
+
+    private var alignDone = false
+    private var rotationDeg = 0.0
 
     private val hStartRelCar: Double? = when (ref) {
         StartRef.GROUND -> rec.floor.dhGroundM?.let { -it }
@@ -64,8 +73,10 @@ class Guidance(
     }
 
     val isAnchored: Boolean get() = anchored
+    val hasVerticalReference: Boolean get() = hStartRelCar != null
 
     fun onPressure(tMs: Long, hPa: Double) {
+        lastT = maxOf(lastT, tMs)
         val h = Baro.altitudeM(smoother.push(hPa))
         hNow = h
         if (hStart == null) {
@@ -77,36 +88,44 @@ class Guidance(
     }
 
     fun onStep(tMs: Long) {
+        lastT = maxOf(lastT, tMs)
         segmenter.onStep(tMs)
         recentSteps.addLast(tMs)
         while (recentSteps.isNotEmpty() && recentSteps.first() < tMs - 30_000) recentSteps.removeFirst()
         pdr?.onStep(tMs)
     }
 
-    fun onHeading(deg: Double) {
-        lastHeadingDeg = deg
-        arrowHeading.push(deg)
-        pdr?.onHeading(deg)
+    fun onHeading(tMs: Long, deg: Double, up: DoubleArray? = null) {
+        lastT = maxOf(lastT, tMs)
+        tracker.onSample(tMs, deg, up)
+    }
+
+    /** Height change since guidance started, metres (positive = went up). */
+    fun heightFromStart(): Double? {
+        val hs = hStart ?: return null
+        val hn = hNow ?: return null
+        return hn - hs
     }
 
     /** Height of the user above the car in metres; null when no vertical reference exists. */
     fun hRelCar(): Double? {
-        val hs = hStart ?: return null
-        val hn = hNow ?: return null
+        val d = heightFromStart() ?: return null
         val rel = hStartRelCar ?: return null
-        return (hn - hs) + rel
+        return d + rel
     }
+
+    fun isSettled(tMs: Long): Boolean = segmenter.isSettled(tMs)
 
     /** Distance from the estimated user position to the car, for the "found" error. */
     fun distanceToCar(): Double? {
         val car = rec.carInAnchorFrame ?: return null
         val p = pdr ?: return null
-        return (car - p.pos).norm()
+        return (car.rotatedBy(rotationDeg) - p.pos).norm()
     }
 
     fun state(tMs: Long): GuideState {
         val label = rec.displayLabel
-        if (hStart == null) return simple(GuideMode.CALIBRATING, label, "기압을 재는 중이에요", null)
+        if (hStart == null) return simple(GuideMode.CALIBRATING, label, "기압을 재는 중이에요")
         val r = hRelCar()
             ?: return memory(label, "층 기준이 없어요. ${label ?: "기록된 층"}으로 가세요", "T4")
 
@@ -114,61 +133,83 @@ class Guidance(
             if (abs(r) >= 0.6 * floorH) {
                 val n = max(1, (abs(r) / floorH).roundToInt())
                 val down = r > 0
-                val text = if (abs(r) > 2.5 * floorH) {
+                val far = abs(r) > 2.5 * floorH
+                val text = if (far) {
                     if (down) "${label ?: "차 있는 층"}으로 내려가세요" else "${label ?: "차 있는 층"}으로 올라가세요"
                 } else {
                     if (down) "▼ ${n}개 층 더 내려가세요" else "▲ ${n}개 층 올라가세요"
                 }
-                val floorsToGo = if (abs(r) > 2.5 * floorH) null else if (down) n else -n
-                return GuideState(GuideMode.FLOOR, label, floorsToGo, null, null, 90.0, text, null, tier(), r, null)
+                val floorsToGo = if (far) null else if (down) n else -n
+                return GuideState(GuideMode.FLOOR, label, floorsToGo, null, null, 90.0, text, null, tier(), r, null, null, refName())
             }
-            return GuideState(GuideMode.SETTLING, label, 0, null, null, 90.0, "이 층이에요. 잠시 멈춰 주세요", null, tier(), r, null)
+            return GuideState(GuideMode.SETTLING, label, 0, null, null, 90.0, "이 층이에요. 엘리베이터에서 나오세요", null, tier(), r, null, null, refName())
         }
 
-        val car = rec.carInAnchorFrame
+        val car0 = rec.carInAnchorFrame
             ?: return memory(label, "이 층이에요. 위치 기록이 없어 주변을 둘러보세요", "T3")
         val p = pdr!!
+        tryAlign(p)
+        val car = car0.rotatedBy(rotationDeg)
         val u = p.pos
-        val wps = rec.waypointsFromAnchor.ifEmpty { listOf(car) }
+        val wps = rec.waypointsFromAnchor.ifEmpty { listOf(car0) }.map { it.rotatedBy(rotationDeg) }
         while (wpIdx < wps.lastIndex && passedWaypoint(u, wps[wpIdx], wps[wpIdx + 1])) wpIdx++
         val target = wps[wpIdx]
         var remaining = (target - u).norm()
         for (k in wpIdx until wps.lastIndex) remaining += (wps[k + 1] - wps[k]).norm()
         val dCar = (car - u).norm()
         val sigma = 1.5 + 0.05 * (rec.pathLengthM + p.distanceM)
-        val sigmaPsi = if (learned) 8.0 else 20.0
-        val heading = arrowHeading.value
-        val arrow = heading?.let { angleDiff((target - u).bearingDeg(), it) }
+        val sigmaPsi = if (learned) 8.0 else if (alignDone) 15.0 else 25.0
+        val pointing = tracker.pointing(tMs)
+        val arrow = pointing?.let { angleDiff((target - u).bearingDeg(), it) }
         val cone = (Math.toDegrees(atan(sigma / max(remaining, 0.5))) + sigmaPsi).coerceIn(10.0, 90.0)
         val beep = beepInterval(remaining, sigma)
+        val align = if (alignDone) rotationDeg else null
 
         if (dCar < max(4.0, 1.5 * sigma)) {
-            return GuideState(GuideMode.ARRIVE, label, 0, dCar, arrow, cone, "이 근처예요", beep, tier(), r, sigma)
+            return GuideState(GuideMode.ARRIVE, label, 0, dCar, arrow, cone, "이 근처예요", beep, tier(), r, sigma, align, refName())
         }
         val (mode, text) = if (wpIdx < wps.lastIndex) {
             GuideMode.STEP to "${(target - u).norm().roundToInt()} m 간 뒤 ${turnWord(wps, wpIdx)}"
         } else {
             GuideMode.VECTOR to "화살표 방향으로 가세요"
         }
-        return GuideState(mode, label, 0, remaining, arrow, cone, text, beep, tier(), r, sigma)
+        return GuideState(mode, label, 0, remaining, arrow, cone, text, beep, tier(), r, sigma, align, refName())
+    }
+
+    /**
+     * Lift-door alignment: the first straight ~3 m out of the door should point
+     * the way the stored door bearing says. A large mismatch means the two trips
+     * were measured in different frames (pocket vs hand), so rotate the stored path.
+     */
+    private fun tryAlign(p: Pdr) {
+        if (alignDone) return
+        val door = rec.doorBearingDeg
+        if (door == null) { alignDone = true; return }
+        if (p.distanceM > 10.0) { alignDone = true; return }
+        val disp = p.pos.norm()
+        if (disp < 3.0 || disp < 0.8 * p.distanceM) return
+        val delta = angleDiff(p.pos.bearingDeg(), door)
+        rotationDeg = if (abs(delta) >= 20.0) delta else 0.0
+        alignDone = true
     }
 
     private fun updateAnchor(tMs: Long) {
         val r = hRelCar() ?: return
         val onCarFloor = abs(r) < 0.6 * floorH
         if (anchored) {
-            // Left the car floor again (e.g. took the stairs the wrong way): start over.
+            // Left the car floor again (e.g. wrong stairs): start over.
             if (!onCarFloor) {
                 if (offFloorSinceMs < 0) offFloorSinceMs = tMs
-                if (tMs - offFloorSinceMs > 5_000) { anchored = false; pdr = null; wpIdx = 0 }
+                if (tMs - offFloorSinceMs > 5_000) {
+                    anchored = false; pdr = null; wpIdx = 0; alignDone = false; rotationDeg = 0.0
+                }
             } else offFloorSinceMs = -1L
             return
         }
-        if (onCarFloor && segmenter.isSettled(tMs)) {
+        if (onCarFloor && segmenter.isSettled(tMs, minMs = 1_000)) {
             anchored = true
             offFloorSinceMs = -1L
-            val p = Pdr(stepScale, rec.gridAngleDeg)
-            lastHeadingDeg?.let { p.onHeading(it) }
+            val p = Pdr(stepScale, rec.gridAngleDeg, tracker = tracker, ownsTracker = false)
             // Steps taken since the lift stopped already count (walking out of the lift).
             val since = segmenter.lastPlateauStartMs
             if (since > 0) recentSteps.filter { it >= since }.forEach { p.onStep(it) }
@@ -177,17 +218,19 @@ class Guidance(
         }
     }
 
+    private fun refName() = if (ref == StartRef.GROUND) "지상 출발" else "도착지 출발"
+
     private fun tier(): String = when {
         rec.carInAnchorFrame == null -> "T3"
         learned -> "T1"
         else -> "T2"
     }
 
-    private fun simple(mode: GuideMode, label: String?, text: String, r: Double?) =
-        GuideState(mode, label, null, null, null, 90.0, text, null, tier(), r, null)
+    private fun simple(mode: GuideMode, label: String?, text: String) =
+        GuideState(mode, label, null, null, null, 90.0, text, null, tier(), null, null, null, refName())
 
     private fun memory(label: String?, text: String, tier: String) =
-        GuideState(GuideMode.MEMORY, label, null, null, null, 90.0, text, null, tier, hRelCar(), null)
+        GuideState(GuideMode.MEMORY, label, null, null, null, 90.0, text, null, tier, hRelCar(), null, null, refName())
 
     companion object {
         /** Design doc 5.9: faster pulses closer in; a steady search pulse when the estimate is too uncertain. */
@@ -221,6 +264,112 @@ class Guidance(
                 d < -30 -> "왼쪽으로"
                 else -> "계속 직진"
             }
+        }
+    }
+}
+
+/**
+ * One return trip. Where the user starts is not known for sure: at home (where
+ * the walk-out ended) or at street level. Both assumptions are tracked and the
+ * one the barometer agrees with is shown (fixes the "GPS fix at a window" trap).
+ * Open-air parkings with a GNSS position get a GPS arrow instead (F05).
+ */
+class GuideSession(
+    private val rec: ParkingRecord,
+    private val floorH: Double = FloorEstimator.DEFAULT_FLOOR_H,
+    learned: Boolean = false,
+    stepScale: Double = 1.0,
+) {
+    private val endGuide = rec.dhEndM?.let { Guidance(rec, Guidance.StartRef.WALK_END, floorH, learned, stepScale) }
+    private val groundGuide = rec.floor.dhGroundM?.let { Guidance(rec, Guidance.StartRef.GROUND, floorH, learned, stepScale) }
+    private val all = listOfNotNull(endGuide, groundGuide)
+    private val pointingTracker = HeadingTracker()
+
+    var active: Guidance? = endGuide ?: groundGuide
+        private set
+    private var strongFixes = 0
+    private var lastFix: GnssSample? = null
+    private var lastT = 0L
+
+    /** Bumps whenever [active] changes, so the caller can log it. */
+    var switches = 0
+        private set
+
+    val isAnchored: Boolean get() = active?.isAnchored == true
+
+    fun onPressure(tMs: Long, hPa: Double) {
+        lastT = maxOf(lastT, tMs)
+        all.forEach { it.onPressure(tMs, hPa) }
+        reselect(tMs)
+    }
+
+    fun onStep(tMs: Long) {
+        lastT = maxOf(lastT, tMs)
+        all.forEach { it.onStep(tMs) }
+    }
+
+    fun onHeading(tMs: Long, deg: Double, up: DoubleArray? = null) {
+        lastT = maxOf(lastT, tMs)
+        all.forEach { it.onHeading(tMs, deg, up) }
+        pointingTracker.onSample(tMs, deg, up)
+    }
+
+    fun onGnss(s: GnssSample) {
+        lastT = maxOf(lastT, s.tMs)
+        if (s.good) lastFix = s
+        // A strong fix before any vertical move suggests the user is outdoors at street level.
+        val moved = abs(active?.heightFromStart() ?: 0.0) > 2.0
+        val strong = s.good && s.accuracyM <= 12.0 && (s.satellitesUsed < 0 || s.satellitesUsed >= 6)
+        if (!moved && strong) {
+            strongFixes++
+            if (strongFixes >= 3 && groundGuide != null && active !== groundGuide) setActive(groundGuide)
+        }
+    }
+
+    fun distanceToCar(): Double? = active?.distanceToCar()
+
+    fun state(tMs: Long): GuideState {
+        val geo = rec.carGeo
+        if (rec.carInAnchorFrame == null && rec.anchorMode == null && geo != null) return gnssState(tMs, geo)
+        val g = active
+            ?: return GuideState(GuideMode.MEMORY, rec.displayLabel, null, null, null, 90.0,
+                "층 기준이 없어요. ${rec.displayLabel ?: "기록된 층"}으로 가세요", null, "T4", null, null)
+        return g.state(tMs)
+    }
+
+    private fun reselect(tMs: Long) {
+        val a = active ?: return
+        val b = all.firstOrNull { it !== a } ?: return
+        val ra = a.hRelCar() ?: return
+        val rb = b.hRelCar() ?: return
+        // On a settled level the barometer agrees with one assumption and clearly not the other.
+        if (a.isSettled(tMs) && abs(ra) > 2.5 * floorH && abs(rb) < 0.4 * floorH) { setActive(b); return }
+        // Starting at street level, nobody goes far deeper than the car: it was the other start.
+        if (a === groundGuide && ra < -2.5 * floorH && endGuide != null) setActive(endGuide)
+    }
+
+    private fun setActive(g: Guidance) {
+        active = g
+        switches++
+    }
+
+    private fun gnssState(tMs: Long, car: GeoFix): GuideState {
+        val label = rec.displayLabel
+        val fix = lastFix
+        if (fix == null || tMs - fix.tMs > 5_000) {
+            return GuideState(GuideMode.MEMORY, label, null, null, null, 90.0, "GPS를 찾는 중이에요", 1.5, "T2", null, null, null, "GPS")
+        }
+        val v = GeoFix(fix.lat, fix.lon, fix.accuracyM).vectorTo(car)
+        val d = v.norm()
+        val sigma = max(fix.accuracyM, car.accuracyM)
+        val pointing = pointingTracker.pointing(tMs)
+        val arrow = pointing?.let { angleDiff(v.bearingDeg(), it) }
+        val cone = (Math.toDegrees(atan(sigma / max(d, 0.5))) + 10.0).coerceIn(10.0, 90.0)
+        val beep = Guidance.beepInterval(d, sigma)
+        return if (d < max(5.0, 1.2 * sigma)) {
+            GuideState(GuideMode.ARRIVE, label, 0, d, arrow, cone, "이 근처예요", beep, "T2", null, sigma, null, "GPS")
+        } else {
+            GuideState(GuideMode.VECTOR, label, 0, d, arrow, cone, "화살표 방향으로 가세요", beep, "T2", null, sigma, null, "GPS")
         }
     }
 }

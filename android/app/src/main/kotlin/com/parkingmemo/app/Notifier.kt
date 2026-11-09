@@ -22,6 +22,7 @@ object Notifier {
     private const val CH_TRACK = "track"
     private const val CH_EVENTS = "events"
     const val ONGOING_ID = 1
+    private const val CH_PARKED = "parked"
     private const val SAVED_ID = 2
     private const val TAP_ID = 3
 
@@ -29,6 +30,7 @@ object Notifier {
         val nm = ctx.getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel(CH_TRACK, "기록 중 표시", NotificationManager.IMPORTANCE_LOW))
         nm.createNotificationChannel(NotificationChannel(CH_EVENTS, "주차 알림", NotificationManager.IMPORTANCE_DEFAULT))
+        nm.createNotificationChannel(NotificationChannel(CH_PARKED, "주차 위치 (잠금화면)", NotificationManager.IMPORTANCE_LOW))
     }
 
     private fun openApp(ctx: Context, action: String? = null): PendingIntent {
@@ -57,29 +59,37 @@ object Notifier {
         if (canPost(ctx)) NotificationManagerCompat.from(ctx).notify(ONGOING_ID, ongoing(ctx, text))
     }
 
+    /**
+     * Stays in the notification shade and on the lock screen after parking, with a
+     * one-tap "find my car" button (the design's lock-screen card).
+     */
     @SuppressLint("MissingPermission")
-    fun saved(ctx: Context, r: ParkingRecord) {
+    fun parked(ctx: Context, r: ParkingRecord) {
         if (!canPost(ctx)) return
         val label = r.displayLabel
         val title = if (label != null) "${label}에 주차했어요" else "주차 위치를 기록했어요"
+        val time = java.text.SimpleDateFormat("HH:mm", java.util.Locale.KOREA).format(java.util.Date(r.parkedAtWallMs))
         val body = buildString {
-            r.floor.dhGroundM?.let { append("지상보다 %.1f m %s".format(abs(it), if (it < 0) "아래" else "위")) }
-            r.carInAnchorFrame?.let {
-                if (isNotEmpty()) append(" · ")
-                append("엘리베이터에서 약 ${it.norm().roundToInt()} m")
-            }
-            if (isNotEmpty()) append(" · ")
-            append("탭해서 층 확인")
+            append(time)
+            r.floor.dhGroundM?.let { append(" · 지상보다 %.1f m %s".format(abs(it), if (it < 0) "아래" else "위")) }
+            r.carInAnchorFrame?.let { append(" · 엘리베이터에서 약 ${it.norm().roundToInt()} m") }
         }
-        val n = NotificationCompat.Builder(ctx, CH_EVENTS)
+        val find = openApp(ctx, TrackerService.ACTION_START_GUIDE)
+        val n = NotificationCompat.Builder(ctx, CH_PARKED)
             .setSmallIcon(R.drawable.ic_stat_parking)
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-            .setAutoCancel(true)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setOnlyAlertOnce(true)
             .setContentIntent(openApp(ctx))
+            .addAction(0, "차 찾기", find)
             .build()
         NotificationManagerCompat.from(ctx).notify(SAVED_ID, n)
+    }
+
+    fun cancelParked(ctx: Context) {
+        NotificationManagerCompat.from(ctx).cancel(SAVED_ID)
     }
 
     /** Android refused to start the service from the background: ask for one tap instead. */

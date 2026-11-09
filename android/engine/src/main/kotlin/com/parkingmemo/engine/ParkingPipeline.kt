@@ -57,10 +57,10 @@ class ParkingPipeline(
         walk?.onPressure(tMs, hPa)
     }
 
-    fun heading(tMs: Long, deg: Double) {
+    fun heading(tMs: Long, deg: Double, up: DoubleArray? = null) {
         nowMs = tMs
-        buffer.addHeading(tMs, deg)
-        walk?.onHeading(tMs, deg)
+        buffer.addHeading(tMs, deg, up)
+        walk?.onHeading(tMs, deg, up)
     }
 
     fun gnss(s: GnssSample) {

@@ -30,6 +30,14 @@ data class ParkingRecord(
     val floor: FloorEstimate,
     /** Label the user typed in, overriding the estimate (D10). */
     val userLabel: String? = null,
+    /**
+     * Bearing from the anchor back along the last ~3 m walked before it, i.e. the
+     * direction a person faces when stepping out of the lift door. Used to align
+     * the return trip when the phone was carried differently (pocket vs hand).
+     */
+    val doorBearingDeg: Double? = null,
+    /** GNSS position of the car when it was parked in the open (F05). */
+    val carGeo: GeoFix? = null,
 ) {
     val displayLabel: String? get() = userLabel ?: floor.label
 }
@@ -60,15 +68,15 @@ class WalkOutBuilder(
 
     init {
         // Replay what happened between the walking origin and now (A06 rewind).
-        data class Ev(val t: Long, val kind: Int, val v: Double)
+        class Ev(val t: Long, val kind: Int, val v: Double, val up: DoubleArray? = null)
         val evs = mutableListOf<Ev>()
         pre.pressure.filter { it.tMs >= originMs - 10_000 }.forEach { evs += Ev(it.tMs, 0, it.hPa) }
-        pre.headings.filter { it.tMs >= originMs - 2_000 }.forEach { evs += Ev(it.tMs, 1, it.deg) }
+        pre.headings.filter { it.tMs >= originMs - 5_000 }.forEach { evs += Ev(it.tMs, 1, it.deg, it.up) }
         pre.steps.filter { it >= originMs }.forEach { evs += Ev(it, 2, 0.0) }
         evs.sortWith(compareBy({ it.t }, { it.kind }))
         for (e in evs) when (e.kind) {
             0 -> feedPressure(e.t, e.v)
-            1 -> pdr.onHeading(e.v)
+            1 -> pdr.onHeading(e.t, e.v, e.up)
             else -> feedStep(e.t)
         }
     }
@@ -83,9 +91,9 @@ class WalkOutBuilder(
         feedStep(tMs)
     }
 
-    fun onHeading(tMs: Long, deg: Double) {
-        buf.addHeading(tMs, deg)
-        pdr.onHeading(deg)
+    fun onHeading(tMs: Long, deg: Double, up: DoubleArray? = null) {
+        buf.addHeading(tMs, deg, up)
+        pdr.onHeading(tMs, deg, up)
         latestMs = maxOf(latestMs, tMs)
     }
 
@@ -138,8 +146,10 @@ class WalkOutBuilder(
         val pts = PathTools.rebuild(carFloorTrack, grid)
         var carInAnchor: Vec2? = null
         var waypoints: List<Vec2> = emptyList()
+        var doorBearing: Double? = null
         if (anchorIdx != null && pts.isNotEmpty()) {
             val anchor = pts.last()
+            doorBearing = doorBearing(listOf(Vec2.ZERO) + pts)
             val start = PathTools.foldStart(pts, pts.lastIndex)
             val walked = listOf(Vec2.ZERO) + pts.subList(maxOf(start, 0), pts.size)
             val simple = PathTools.simplify(walked)
@@ -167,7 +177,29 @@ class WalkOutBuilder(
             pathLengthM = carFloorTrack.sumOf { it.lenM },
             segments = segmenter.segments.toList(),
             floor = floor,
+            doorBearingDeg = doorBearing,
+            carGeo = carGeo(),
         )
+    }
+
+    /** Bearing from the end of [path] back to the point ~3 m earlier along it. */
+    private fun doorBearing(path: List<Vec2>, backM: Double = 3.0): Double? {
+        if (path.size < 2) return null
+        val end = path.last()
+        var walked = 0.0
+        for (i in path.lastIndex downTo 1) {
+            walked += (path[i] - path[i - 1]).norm()
+            if (walked >= backM) return (path[i - 1] - end).bearingDeg()
+        }
+        val start = path.first() - end
+        return if (start.norm() >= 1.0) start.bearingDeg() else null
+    }
+
+    /** Open-air parking: a trusted fix close to the moment of leaving the car. */
+    private fun carGeo(): GeoFix? {
+        val fix = buf.gnss.filter { it.good && it.tMs in (originMs - 30_000)..(originMs + 20_000) }
+            .minByOrNull { abs(it.tMs - originMs) } ?: return null
+        return GeoFix(fix.lat, fix.lon, fix.accuracyM)
     }
 
     private fun feedPressure(tMs: Long, hPa: Double) {

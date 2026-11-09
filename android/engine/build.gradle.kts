@@ -2,6 +2,12 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("org.jetbrains.kotlin.jvm")
+    application
+}
+
+application {
+    mainClass.set("com.parkingmemo.engine.ReplayMainKt")
+    applicationDefaultJvmArgs = listOf("-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8")
 }
 
 java {

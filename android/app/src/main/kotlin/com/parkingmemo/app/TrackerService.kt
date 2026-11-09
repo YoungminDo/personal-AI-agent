@@ -24,10 +24,11 @@ import android.os.PowerManager
 import android.os.SystemClock
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import com.parkingmemo.engine.AccelStepDetector
 import com.parkingmemo.engine.GnssSample
 import com.parkingmemo.engine.GuideMode
+import com.parkingmemo.engine.GuideSession
 import com.parkingmemo.engine.GuideState
-import com.parkingmemo.engine.Guidance
 import com.parkingmemo.engine.Heading
 import com.parkingmemo.engine.LogFormat
 import com.parkingmemo.engine.ParkingPipeline
@@ -66,11 +67,17 @@ class TrackerService : Service(), SensorEventListener {
                 Notifier.needsTap(ctx, action)
             }
         }
+
+        /** True when steps must come from the raw accelerometer (no detector or no permission). */
+        fun needsAccelSteps(ctx: Context): Boolean {
+            val sm = ctx.getSystemService(SensorManager::class.java) ?: return true
+            val granted = ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACTIVITY_RECOGNITION) ==
+                PackageManager.PERMISSION_GRANTED
+            return !granted || sm.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR) == null
+        }
     }
 
     private enum class Rate { OFF, DRIVE, ACTIVE }
-
-    private data class Pending(val t: Long, val kind: Int, val v: Double)
 
     private val app get() = application as ParkingApp
     private lateinit var sm: SensorManager
@@ -82,10 +89,9 @@ class TrackerService : Service(), SensorEventListener {
 
     private var guiding = false
     private var guideRec: ParkingRecord? = null
-    private var guidance: Guidance? = null
+    private var session: GuideSession? = null
     private var guideStartMs = 0L
-    private var guideSawGoodGnss = false
-    private val pending = mutableListOf<Pending>()
+    private var lastSwitches = 0
     private var lastGuideMode: GuideMode? = null
     private var nextPulseAtMs = 0L
 
@@ -100,6 +106,7 @@ class TrackerService : Service(), SensorEventListener {
     private var lastRotLogMs = 0L
     private var lastTickMs = 0L
     private var loopRunning = false
+    private var accelSteps: AccelStepDetector? = null
 
     private fun now() = SystemClock.elapsedRealtime()
 
@@ -201,7 +208,7 @@ class TrackerService : Service(), SensorEventListener {
                 log?.event(now(), "SAVED", r.displayLabel ?: "?")
                 closeLog()
                 pipeline = null
-                Notifier.saved(this, r)
+                Notifier.parked(this, r)
                 TrackerState.recordVersion.value = TrackerState.recordVersion.value + 1
                 TrackerState.walkInfo.value = ""
                 TrackerState.message.value = "주차 위치를 저장했어요 (${r.displayLabel ?: "층 미상"})"
@@ -222,22 +229,23 @@ class TrackerService : Service(), SensorEventListener {
     // --------------------------------------------------------------- guidance
 
     private fun startGuide() {
+        if (guiding) return
         val rec = app.store.loadRecord()
         if (rec == null) {
             TrackerState.message.value = "저장된 주차 기록이 없어요"
             if (pipeline == null) shutdown()
             return
         }
+        val sites = app.store.loadSites()
         guiding = true
         guideRec = rec
-        guidance = null
-        pending.clear()
-        guideSawGoodGnss = false
+        session = GuideSession(rec, sites.floorHeight(rec.siteKey), sites.isLearned(rec.siteKey))
+        lastSwitches = 0
         guideStartMs = now()
         lastGuideMode = null
         nextPulseAtMs = 0L
         if (log == null) openLog("guide")
-        log?.event(guideStartMs, "GUIDE_START")
+        log?.event(guideStartMs, "GUIDE_START", rec.displayLabel ?: "?")
         setRate(Rate.ACTIVE)
         acquireWake()
         TrackerState.status.value = TrackerState.Status.GUIDING
@@ -249,31 +257,6 @@ class TrackerService : Service(), SensorEventListener {
         startLoop()
     }
 
-    /** After a few seconds, decide where the user is starting from (street or last destination). */
-    private fun createGuidance() {
-        val rec = guideRec ?: return
-        val ref = when {
-            guideSawGoodGnss && rec.floor.dhGroundM != null -> Guidance.StartRef.GROUND
-            rec.dhEndM != null -> Guidance.StartRef.WALK_END
-            else -> Guidance.StartRef.GROUND
-        }
-        val sites = app.store.loadSites()
-        val g = Guidance(rec, ref, sites.floorHeight(rec.siteKey), sites.isLearned(rec.siteKey))
-        for (e in pending) when (e.kind) {
-            0 -> g.onPressure(e.t, e.v)
-            1 -> g.onHeading(e.v)
-            else -> g.onStep(e.t)
-        }
-        pending.clear()
-        guidance = g
-        log?.event(now(), "GUIDE_REF", ref.name)
-        TrackerState.message.value = if (ref == Guidance.StartRef.GROUND) {
-            "지상에서 출발한 것으로 계산해요"
-        } else {
-            "지난번 도착한 곳(집 등)에서 출발한 것으로 계산해요"
-        }
-    }
-
     private fun stopGuide(found: Boolean, auto: Boolean = false) {
         if (!guiding) {
             if (pipeline == null) shutdown()
@@ -281,9 +264,9 @@ class TrackerService : Service(), SensorEventListener {
         }
         val t = now()
         val rec = guideRec
-        val g = guidance
+        val s = session
         if (found && rec != null) {
-            val err = if (g?.isAnchored == true) g.distanceToCar() else null
+            val err = if (s?.isAnchored == true) s.distanceToCar() else null
             val site = rec.siteKey
             if (err != null && site != null) {
                 val sites = app.store.loadSites()
@@ -293,13 +276,13 @@ class TrackerService : Service(), SensorEventListener {
             log?.event(t, "FOUND", err?.let { "%.1f".format(Locale.US, it) } ?: "")
             val how = if (auto) "차에 연결돼서 안내를 마쳤어요" else "찾았어요"
             TrackerState.message.value = if (err != null) "$how · 추정 위치와 약 ${err.roundToInt()} m 차이" else how
+            Notifier.cancelParked(this)
         }
         log?.event(t, "GUIDE_END")
         closeLog()
         guiding = false
-        guidance = null
+        session = null
         guideRec = null
-        pending.clear()
         TrackerState.guide.value = null
         if (pipeline == null) {
             shutdown()
@@ -335,17 +318,20 @@ class TrackerService : Service(), SensorEventListener {
             }
         }
         if (!guiding) return
-        if (guidance == null && t - guideStartMs >= 4_000) createGuidance()
-        val g = guidance ?: return
-        val s = g.state(t)
-        TrackerState.guide.value = s
+        val s = session ?: return
+        val st = s.state(t)
+        TrackerState.guide.value = st
+        if (s.switches != lastSwitches) {
+            lastSwitches = s.switches
+            log?.event(t, "GUIDE_REF", st.ref ?: "?")
+        }
         val prev = lastGuideMode
-        if (prev != null && s.mode != prev && isMilestone(prev, s.mode)) {
+        if (prev != null && st.mode != prev && isMilestone(prev, st.mode)) {
             feedback.pulse(app.prefs.soundOn, strong = true)
             nextPulseAtMs = t + 600
         }
-        lastGuideMode = s.mode
-        val interval = s.beepIntervalS
+        lastGuideMode = st.mode
+        val interval = st.beepIntervalS
         if (interval != null && t >= nextPulseAtMs) {
             feedback.pulse(app.prefs.soundOn)
             nextPulseAtMs = t + (interval * 1000).toLong()
@@ -369,24 +355,26 @@ class TrackerService : Service(), SensorEventListener {
                 val hPa = e.values[0].toDouble()
                 log?.line(LogFormat.pressure(t, hPa))
                 pipeline?.pressure(t, hPa)
-                feedGuide(t, 0, hPa)
+                session?.onPressure(t, hPa)
             }
-            Sensor.TYPE_STEP_DETECTOR -> {
-                log?.line(LogFormat.step(t))
-                pipeline?.step(t)?.let { handle(it) }
-                feedGuide(t, 2, 0.0)
+            Sensor.TYPE_STEP_DETECTOR -> onStep(t)
+            Sensor.TYPE_ACCELEROMETER -> {
+                accelSteps?.onAccel(t, e.values[0].toDouble(), e.values[1].toDouble(), e.values[2].toDouble())
+                    ?.let { onStep(it) }
             }
             Sensor.TYPE_ROTATION_VECTOR -> {
                 SensorManager.getRotationMatrixFromVector(rotM, e.values)
                 val r = DoubleArray(9) { rotM[it].toDouble() }
                 val deg = Heading.forwardBearing(r) ?: return
+                // Third row of the matrix = world "up" in device axes: tells hand vs pocket.
+                val up = doubleArrayOf(r[6], r[7], r[8])
                 if (t - lastHeadingMs >= 100) {
                     lastHeadingMs = t
-                    log?.line(LogFormat.heading(t, deg))
-                    pipeline?.heading(t, deg)
+                    log?.line(LogFormat.heading(t, deg, up))
+                    pipeline?.heading(t, deg, up)
                 }
-                feedGuide(t, 1, deg)
-                if (t - lastRotLogMs >= 200) {
+                session?.onHeading(t, deg, up)
+                if (t - lastRotLogMs >= 500) {
                     lastRotLogMs = t
                     log?.line("R,$t," + rotM.joinToString(",") { "%.4f".format(Locale.US, it) })
                 }
@@ -394,21 +382,13 @@ class TrackerService : Service(), SensorEventListener {
         }
     }
 
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
-
-    private fun feedGuide(t: Long, kind: Int, v: Double) {
-        if (!guiding) return
-        val g = guidance
-        if (g == null) {
-            pending += Pending(t, kind, v)
-            return
-        }
-        when (kind) {
-            0 -> g.onPressure(t, v)
-            1 -> g.onHeading(v)
-            else -> g.onStep(t)
-        }
+    private fun onStep(t: Long) {
+        log?.line(LogFormat.step(t))
+        pipeline?.step(t)?.let { handle(it) }
+        session?.onStep(t)
     }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 
     private fun has(perm: String) =
         ContextCompat.checkSelfPermission(this, perm) == PackageManager.PERMISSION_GRANTED
@@ -424,7 +404,12 @@ class TrackerService : Service(), SensorEventListener {
         val pressureUs = if (r == Rate.DRIVE) 200_000 else 100_000
         val rotationUs = if (r == Rate.DRIVE) 200_000 else 33_000
         sm.getDefaultSensor(Sensor.TYPE_PRESSURE)?.let { sm.registerListener(this, it, pressureUs, 0) }
-        if (has(Manifest.permission.ACTIVITY_RECOGNITION)) {
+        if (needsAccelSteps(this)) {
+            accelSteps = AccelStepDetector()
+            log?.event(now(), "STEP_SOURCE", "accelerometer")
+            sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let { sm.registerListener(this, it, 20_000, 0) }
+        } else {
+            accelSteps = null
             sm.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)?.let {
                 sm.registerListener(this, it, SensorManager.SENSOR_DELAY_FASTEST, 0)
             }
@@ -480,25 +465,31 @@ class TrackerService : Service(), SensorEventListener {
         val s = GnssSample(t, loc.latitude, loc.longitude, loc.accuracy.toDouble(), sats)
         log?.line(LogFormat.gnss(s))
         pipeline?.gnss(s)
-        if (guiding && guidance == null && s.good) guideSawGoodGnss = true
+        session?.onGnss(s)
     }
 
     // ----------------------------------------------------------------- plumbing
 
+    /** Tries the strongest service type first and falls back, so a missing permission never crashes. */
     private fun startInForeground(text: String) {
-        var types = 0
-        if (has(Manifest.permission.ACCESS_FINE_LOCATION)) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-        if (Build.VERSION.SDK_INT >= 34) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH
         val n = Notifier.ongoing(this, text)
-        try {
-            ServiceCompat.startForeground(this, Notifier.ONGOING_ID, n, types)
-        } catch (e: Exception) {
+        val candidates = mutableListOf<Int>()
+        val loc = if (has(Manifest.permission.ACCESS_FINE_LOCATION)) ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else 0
+        if (Build.VERSION.SDK_INT >= 34) {
+            candidates += loc or ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH
+            candidates += ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH
+        } else {
+            if (loc != 0) candidates += loc
+            candidates += 0
+        }
+        for (types in candidates) {
             try {
-                ServiceCompat.startForeground(this, Notifier.ONGOING_ID, n, 0)
-            } catch (e2: Exception) {
-                TrackerState.message.value = "백그라운드 실행이 막혔어요. 설정에서 권한을 확인해 주세요"
+                ServiceCompat.startForeground(this, Notifier.ONGOING_ID, n, types)
+                return
+            } catch (_: Exception) {
             }
         }
+        TrackerState.message.value = "백그라운드 실행이 막혔어요. 설정에서 권한을 확인해 주세요"
     }
 
     private fun openLog(kind: String) {
@@ -508,6 +499,7 @@ class TrackerService : Service(), SensorEventListener {
         } catch (e: Exception) {
             null
         }
+        if (accelSteps != null) log?.event(now(), "STEP_SOURCE", "accelerometer")
     }
 
     private fun closeLog() {
