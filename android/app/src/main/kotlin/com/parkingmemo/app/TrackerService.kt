@@ -200,7 +200,7 @@ class TrackerService : Service(), SensorEventListener {
             is ParkingPipeline.Output.WalkStarted -> {
                 log?.event(out.originMs, "WALK_STARTED")
                 TrackerState.status.value = TrackerState.Status.WALK_OUT
-                Notifier.updateOngoing(this, "하차 경로를 기록하고 있어요")
+                Notifier.updateOngoing(this, "하차 경로를 기록하고 있어요 · 도착하면 완료를 눌러 주세요", endWalk = true)
             }
             is ParkingPipeline.Output.Saved -> {
                 val r = out.record

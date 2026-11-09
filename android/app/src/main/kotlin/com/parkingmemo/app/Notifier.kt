@@ -43,8 +43,9 @@ object Notifier {
         )
     }
 
-    fun ongoing(ctx: Context, text: String): Notification =
-        NotificationCompat.Builder(ctx, CH_TRACK)
+    /** [endWalk]: show an "I've arrived" button while the walk-out is being recorded. */
+    fun ongoing(ctx: Context, text: String, endWalk: Boolean = false): Notification {
+        val b = NotificationCompat.Builder(ctx, CH_TRACK)
             .setSmallIcon(R.drawable.ic_stat_parking)
             .setContentTitle("파킹메모")
             .setContentText(text)
@@ -52,11 +53,13 @@ object Notifier {
             .setOnlyAlertOnce(true)
             .setContentIntent(openApp(ctx))
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .build()
+        if (endWalk) b.addAction(0, "도착했어요 · 기록 완료", openApp(ctx, TrackerService.ACTION_END_WALK))
+        return b.build()
+    }
 
     @SuppressLint("MissingPermission")
-    fun updateOngoing(ctx: Context, text: String) {
-        if (canPost(ctx)) NotificationManagerCompat.from(ctx).notify(ONGOING_ID, ongoing(ctx, text))
+    fun updateOngoing(ctx: Context, text: String, endWalk: Boolean = false) {
+        if (canPost(ctx)) NotificationManagerCompat.from(ctx).notify(ONGOING_ID, ongoing(ctx, text, endWalk))
     }
 
     /**

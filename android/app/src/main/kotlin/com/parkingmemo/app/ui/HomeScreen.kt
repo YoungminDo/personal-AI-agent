@@ -3,8 +3,10 @@ package com.parkingmemo.app.ui
 import android.content.Context
 import android.content.Intent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -12,8 +14,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -47,6 +51,11 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
+/**
+ * One clear next action per state (design doc 6: one thing at a time).
+ * No record -> how to start; driving -> nothing to do; recording -> "I've arrived";
+ * record saved -> "find my car".
+ */
 @Composable
 fun HomeScreen(onStartGuide: () -> Unit, onOpenSetup: () -> Unit, onOpenSensors: () -> Unit) {
     val ctx = LocalContext.current
@@ -58,59 +67,55 @@ fun HomeScreen(onStartGuide: () -> Unit, onOpenSetup: () -> Unit, onOpenSensors:
     val record = remember(version) { app.store.loadRecord() }
     var showPicker by remember { mutableStateOf(false) }
     var soundOn by remember { mutableStateOf(app.prefs.soundOn) }
+    val manualPark = { TrackerService.send(ctx, TrackerService.ACTION_MANUAL_PARK) }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(Bg)
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp, vertical = 24.dp),
+            .padding(horizontal = 20.dp, vertical = 20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         Text("파킹메모", color = Ink, fontSize = 26.sp, fontWeight = FontWeight.Bold)
         Text(app.prefs.carName?.let { "내 차: $it" } ?: "차가 선택되지 않았어요", color = Muted, fontSize = 14.sp)
 
-        StatusLine(status, walkInfo)
-
-        if (record != null) {
-            RecordCard(record, onEditFloor = { showPicker = true })
-        } else {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(CardBg)
-                    .padding(18.dp),
-            ) {
-                Text("아직 주차 기록이 없어요", color = Ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                Text("차 블루투스가 끊기고 걷기 시작하면 자동으로 기록해요", color = Muted, fontSize = 14.sp)
+        when {
+            status == TrackerState.Status.WALK_OUT -> RecordingCard(
+                walkInfo = walkInfo,
+                onDone = { TrackerService.send(ctx, TrackerService.ACTION_END_WALK) },
+            )
+            status == TrackerState.Status.WAITING_WALK -> InfoCard(
+                title = "차에서 내렸나요?",
+                body = "걷기 시작하면 자동으로 경로 기록을 시작해요. 아직 차 안이면 그대로 두세요.",
+            )
+            status == TrackerState.Status.DRIVING -> InfoCard(
+                title = "운전 중이에요",
+                body = "주차하고 내려서 걸어가면 자동으로 기록해요. 아무것도 누르지 않아도 돼요.",
+            )
+            record != null -> {
+                RecordCard(record, onEditFloor = { showPicker = true })
+                Button(
+                    onClick = onStartGuide,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(60.dp),
+                ) {
+                    Text("차 찾기 시작", fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                }
+                Text("잠금화면의 [차 찾기] 카드로도 바로 시작할 수 있어요", color = Muted, fontSize = 13.sp)
             }
-        }
-
-        Button(
-            onClick = onStartGuide,
-            enabled = record != null && status != TrackerState.Status.GUIDING,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(60.dp),
-        ) {
-            Text("차 찾기 시작", fontSize = 19.sp, fontWeight = FontWeight.Bold)
+            else -> FirstRunCard(onRecordNow = manualPark, onOpenSensors = onOpenSensors)
         }
 
         message?.let { Text(it, color = Accent, fontSize = 14.sp) }
 
         HorizontalDivider(color = LineC)
         Text("테스트 도구", color = Muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-        OutlinedButton(
-            onClick = { TrackerService.send(ctx, TrackerService.ACTION_MANUAL_PARK) },
-            enabled = status == TrackerState.Status.IDLE || status == TrackerState.Status.DRIVING,
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text("지금 주차한 것으로 기록 시작") }
-        if (status == TrackerState.Status.WALK_OUT) {
-            OutlinedButton(
-                onClick = { TrackerService.send(ctx, TrackerService.ACTION_END_WALK) },
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("하차 기록 끝내기 (도착했어요)") }
+        if (record != null && status == TrackerState.Status.IDLE) {
+            OutlinedButton(onClick = manualPark, modifier = Modifier.fillMaxWidth()) {
+                Text("새로 주차했어요 · 지금 기록 시작")
+            }
         }
         OutlinedButton(onClick = onOpenSensors, modifier = Modifier.fillMaxWidth()) {
             Text("센서 확인 (기압·걸음·방향·GPS)")
@@ -143,23 +148,94 @@ fun HomeScreen(onStartGuide: () -> Unit, onOpenSetup: () -> Unit, onOpenSensors:
     }
 }
 
+/** Highlighted card: the one thing to do now. */
 @Composable
-private fun StatusLine(status: TrackerState.Status, walkInfo: String) {
-    val text = when (status) {
-        TrackerState.Status.IDLE -> "대기 중 · 차에 타면 자동으로 시작해요"
-        TrackerState.Status.DRIVING -> "운전 중 · 주차하면 자동으로 기록해요"
-        TrackerState.Status.WAITING_WALK -> "차에서 내리기를 기다리는 중"
-        TrackerState.Status.WALK_OUT -> "하차 경로 기록 중" + if (walkInfo.isNotEmpty()) " · $walkInfo" else ""
-        TrackerState.Status.GUIDING -> "차 찾기 안내 중"
-    }
-    val active = status != TrackerState.Status.IDLE
-    Row(
+private fun ActionCard(content: @Composable () -> Unit) {
+    Column(
         Modifier
-            .clip(RoundedCornerShape(999.dp))
-            .background(if (active) Accent else CardBg)
-            .padding(horizontal = 14.dp, vertical = 7.dp),
-    ) {
-        Text(text, color = if (active) OnAccent else Muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(CardBg)
+            .border(2.dp, Accent, RoundedCornerShape(16.dp))
+            .padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) { content() }
+}
+
+@Composable
+private fun FirstRunCard(onRecordNow: () -> Unit, onOpenSensors: () -> Unit) {
+    ActionCard {
+        Text("다음 할 일", color = Accent, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+        StepLine(1, "센서 확인 (선택)", "엘리베이터를 타면서 높이가 바뀌는지 봐요")
+        StepLine(2, "평소처럼 운전하고 주차하기", "차 블루투스가 끊기고 걷기 시작하면 자동으로 기록돼요")
+        StepLine(3, "목적지까지 걸어가기", "도착해서 [도착했어요]를 누르거나, 몇 분 지나면 저장돼요")
+        Spacer(Modifier.height(2.dp))
+        Text("지금 바로 테스트해 보려면", color = Muted, fontSize = 13.sp)
+        Button(
+            onClick = onRecordNow,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+        ) {
+            Text("지금 차 옆이에요 · 바로 기록 시작", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        }
+        OutlinedButton(onClick = onOpenSensors, modifier = Modifier.fillMaxWidth()) {
+            Text("센서부터 확인하기")
+        }
+    }
+}
+
+@Composable
+private fun RecordingCard(walkInfo: String, onDone: () -> Unit) {
+    ActionCard {
+        Text("하차 경로를 기록하고 있어요", color = Ink, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+        if (walkInfo.isNotEmpty()) Text(walkInfo, color = Accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            "엘리베이터나 계단으로 목적지(집·사무실)까지 평소처럼 가세요. 폰은 주머니에 넣어도 돼요.",
+            color = Ink,
+            fontSize = 15.sp,
+        )
+        Button(
+            onClick = onDone,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(60.dp),
+        ) {
+            Text("도착했어요 · 기록 완료", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        }
+        Text(
+            "안 눌러도 도착 후 5분간 가만히 있거나, 밖으로 나가 GPS가 잡히면 자동으로 저장돼요.",
+            color = Muted,
+            fontSize = 13.sp,
+        )
+    }
+}
+
+@Composable
+private fun InfoCard(title: String, body: String) {
+    ActionCard {
+        Text(title, color = Ink, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+        Text(body, color = Ink, fontSize = 15.sp)
+    }
+}
+
+@Composable
+private fun StepLine(n: Int, title: String, desc: String) {
+    Row(verticalAlignment = Alignment.Top) {
+        Box(
+            Modifier
+                .size(26.dp)
+                .clip(CircleShape)
+                .background(Accent),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("$n", color = OnAccent, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, color = Ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text(desc, color = Muted, fontSize = 13.sp)
+        }
     }
 }
 
@@ -187,6 +263,9 @@ private fun RecordCard(r: ParkingRecord, onEditFloor: () -> Unit) {
                 }
                 r.carInAnchorFrame?.let {
                     Text("엘리베이터·계단에서 약 ${it.norm().roundToInt()} m", color = Muted, fontSize = 14.sp)
+                }
+                if (r.carGeo != null && r.carInAnchorFrame == null) {
+                    Text("지상 주차 · GPS로 안내해요", color = Muted, fontSize = 14.sp)
                 }
             }
         }
