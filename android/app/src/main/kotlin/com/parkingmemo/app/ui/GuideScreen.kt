@@ -97,7 +97,7 @@ fun GuideScreen(onFound: () -> Unit, onClose: () -> Unit) {
             }
         }
 
-        Box(Modifier.size(270.dp), contentAlignment = Alignment.Center) {
+        Box(Modifier.size(if (s?.askFloor == true) 150.dp else 270.dp), contentAlignment = Alignment.Center) {
             if (s == null) {
                 Text("…", color = Muted, fontSize = 64.sp)
             } else {
@@ -122,6 +122,11 @@ fun GuideScreen(onFound: () -> Unit, onClose: () -> Unit) {
             fontWeight = FontWeight.SemiBold,
             textAlign = TextAlign.Center,
         )
+        if (s != null && s.askFloor) {
+            FloorAskCard(guess = s.guessLabel) { picked ->
+                TrackerService.calibrate(ctx, picked, s.targetLabel ?: picked)
+            }
+        }
         Spacer(Modifier.weight(1f))
         if (s != null && s.mode != GuideMode.CALIBRATING) {
             TextButton(onClick = { showCalibrate = true }) {
@@ -160,6 +165,28 @@ private fun LevelChips(selected: String?, onSelect: (String) -> Unit) {
                 Text(l, color = Ink, fontWeight = FontWeight.Bold, fontSize = 17.sp)
             }
         }
+    }
+}
+
+/** Asked right after stepping off a lift or stairs: one tap removes any floor error. */
+@Composable
+private fun FloorAskCard(guess: String?, onPick: (String) -> Unit) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(CardBg)
+            .border(2.dp, Accent, RoundedCornerShape(16.dp))
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text("지금 몇 층인가요?", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Text(
+            "엘리베이터나 기둥의 층 표시를 보고 눌러주세요" + (guess?.let { " · 예상 $it" } ?: ""),
+            color = Muted,
+            fontSize = 13.sp,
+        )
+        LevelChips(guess, onPick)
     }
 }
 

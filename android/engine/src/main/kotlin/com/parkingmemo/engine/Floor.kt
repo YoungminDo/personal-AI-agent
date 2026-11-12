@@ -58,6 +58,12 @@ class SiteBook(
     }
 
     companion object {
+        /** -1 -> B1, 0 -> 1F, 1 -> 2F. */
+        fun labelOf(index: Int): String = if (index < 0) "B${-index}" else "${index + 1}F"
+
+        /** [label] moved by [levels] floors (positive = up), or null for unknown formats. */
+        fun shiftLabel(label: String, levels: Int): String? = levelIndex(label)?.let { labelOf(it + levels) }
+
         /** B1 -> -1, 1F -> 0, 2F -> 1. Null for unknown formats. */
         fun levelIndex(label: String): Int? = when {
             label.startsWith("B") -> label.drop(1).toIntOrNull()?.let { -it }
@@ -102,4 +108,21 @@ object FloorEstimator {
         val n = (dhGroundM / floorH).roundToInt()
         return if (n < 0) "B${-n}" else "${n + 1}F"
     }
+}
+
+/**
+ * Word + the Korean particle "로/으로" chosen by how the word is read aloud:
+ * "B4로" (사), "B3으로" (삼), "B1로" (일, ㄹ), "차 있는 층으로".
+ */
+fun ro(word: String): String {
+    val c = word.lastOrNull() ?: return word
+    val needsEu = when {
+        c in '0'..'9' -> c == '0' || c == '3' || c == '6'
+        c in '\uAC00'..'\uD7A3' -> {
+            val jong = (c.code - 0xAC00) % 28
+            jong != 0 && jong != 8
+        }
+        else -> false
+    }
+    return word + if (needsEu) "으로" else "로"
 }

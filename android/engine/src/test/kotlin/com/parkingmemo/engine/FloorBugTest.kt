@@ -104,4 +104,49 @@ class FloorBugTest {
         val after = feeder.seen.last()
         assertTrue(abs(after.hRelCarM!!) < 0.6, "on the car floor after calibrating: $after")
     }
+
+    @Test
+    fun `stepping off the lift asks which floor this is, with a guess, once`() {
+        // Field test 2 (SFC): the stored reference was off by several metres.
+        val rec = ParkingRecord(
+            parkedAtWallMs = 0, siteKey = null, carPressureHpa = pCar, dhGroundDriveM = null,
+            dhGroundWalkM = null, dhEndM = 20.0, endKind = WalkEnd.STATIONARY, anchorMode = VerticalMode.ELEVATOR,
+            carInAnchorFrame = Vec2(10.0, 0.0), waypointsFromAnchor = listOf(Vec2(10.0, 0.0)), gridAngleDeg = null,
+            pathLengthM = 10.0, segments = emptyList(), floor = FloorEstimate("B5", -16.0, 0.7, "test"),
+        )
+        val sim = Sim(seed = 51, pHpa = pCar - 2.4)       // started 20 m above the car per the record...
+        sim.gnssGood = false
+        val session = GuideSession(rec)
+        val feeder = SessionFeeder(session)
+        sim.stand(3_000)
+        sim.ride(pCar - 1.3, 20_000)                      // ...but the lift stops ~11 m above the car (B4 in reality)
+        sim.stand(2_000)
+        feeder.feed(sim)
+        assertTrue(feeder.seen.none { it.askFloor }, "no question while riding or standing in the lift")
+        sim.walk(3.0, 90.0)                               // steps out
+        feeder.feed(sim)
+        val ask = feeder.seen.last()
+        assertTrue(ask.askFloor, "should ask after stepping out: $ask")
+        assertTrue(ask.guessLabel != null)
+        assertTrue(session.calibrate(currentLabel = "B4", carLabel = "B5"))
+        sim.stand(1_000)
+        feeder.feed(sim)
+        val after = feeder.seen.last()
+        assertTrue(!after.askFloor, "asked once")
+        assertEquals(1, after.floorsToGo, "now one floor down to B5: $after")
+        assertTrue(after.text.contains("1개 층"), after.text)
+    }
+
+    @Test
+    fun `korean particle follows how the floor is read`() {
+        assertEquals("B4로", ro("B4"))
+        assertEquals("B3으로", ro("B3"))
+        assertEquals("B6으로", ro("B6"))
+        assertEquals("B1로", ro("B1"))
+        assertEquals("B7로", ro("B7"))
+        assertEquals("2F로", ro("2F"))
+        assertEquals("차 있는 층으로", ro("차 있는 층"))
+        assertEquals("B4", SiteBook.shiftLabel("B5", 1))
+        assertEquals("1F", SiteBook.shiftLabel("B1", 1))
+    }
 }

@@ -108,6 +108,7 @@ class TrackerService : Service(), SensorEventListener {
     private var guideStartMs = 0L
     private var lastSwitches = 0
     private var lastGuideMode: GuideMode? = null
+    private var lastAsk = false
     private var nextPulseAtMs = 0L
 
     private var rate = Rate.OFF
@@ -367,6 +368,11 @@ class TrackerService : Service(), SensorEventListener {
             nextPulseAtMs = t + 600
         }
         lastGuideMode = st.mode
+        if (st.askFloor && !lastAsk) {
+            feedback.pulse(app.prefs.soundOn, strong = true)
+            log?.event(t, "ASK_FLOOR", st.guessLabel ?: "?")
+        }
+        lastAsk = st.askFloor
         val interval = st.beepIntervalS
         if (interval != null && t >= nextPulseAtMs) {
             feedback.pulse(app.prefs.soundOn)

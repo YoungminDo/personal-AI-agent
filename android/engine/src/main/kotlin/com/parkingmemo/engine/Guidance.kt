@@ -29,6 +29,10 @@ data class GuideState(
     val alignDeg: Double? = null,
     /** Which starting-point assumption is in use (debug). */
     val ref: String? = null,
+    /** Ask the user which floor they are on (they just stepped off a lift or stairs). */
+    val askFloor: Boolean = false,
+    /** Best guess for that question, pre-selected. */
+    val guessLabel: String? = null,
 )
 
 /**
@@ -101,8 +105,23 @@ class Guidance(
             startSamples += h
             if (startSamples.size >= 5) hStart = median(startSamples)
         }
-        segmenter.onHeight(tMs, h)
+        val seg = segmenter.onHeight(tMs, h)
+        if (segmenter.moving) arrivedAtMs = -1L
+        if (seg != null) arrivedAtMs = seg.endMs
         updateAnchor(tMs)
+    }
+
+    /** End of the last vertical move; -1 while moving or before any move. */
+    private var arrivedAtMs = -1L
+
+    /**
+     * True right after the user steps off a lift or stairs (a vertical move ended
+     * and they started walking) and has not told us their floor yet. Asking here
+     * costs one tap and removes every reference error at once.
+     */
+    fun wantsFloorConfirm(): Boolean {
+        if (calibrated || arrivedAtMs < 0) return false
+        return recentSteps.count { it >= arrivedAtMs } >= 2
     }
 
     fun onStep(tMs: Long) {
@@ -145,7 +164,7 @@ class Guidance(
         val label = rec.displayLabel
         if (hStart == null) return simple(GuideMode.CALIBRATING, label, "기압을 재는 중이에요")
         val r = hRelCar()
-            ?: return memory(label, "층 기준이 없어요. ${label ?: "기록된 층"}으로 가세요", "T4")
+            ?: return memory(label, "층 기준이 없어요. ${ro(label ?: "기록된 층")} 가세요", "T4")
 
         if (!anchored) {
             // Half a floor is the boundary between "this floor" and the next one.
@@ -154,7 +173,7 @@ class Guidance(
                 val down = r > 0
                 val far = abs(r) > 2.5 * floorH
                 val text = if (far) {
-                    if (down) "${label ?: "차 있는 층"}으로 내려가세요" else "${label ?: "차 있는 층"}으로 올라가세요"
+                    if (down) "${ro(label ?: "차 있는 층")} 내려가세요" else "${ro(label ?: "차 있는 층")} 올라가세요"
                 } else {
                     if (down) "▼ ${n}개 층 더 내려가세요" else "▲ ${n}개 층 올라가세요"
                 }
@@ -373,13 +392,20 @@ class GuideSession(
         if (rec.carInAnchorFrame == null && rec.anchorMode == null && geo != null) return gnssState(tMs, geo)
         val g = active
             ?: return GuideState(GuideMode.MEMORY, carLabel, null, null, null, 90.0,
-                "층 기준이 없어요. ${carLabel ?: "기록된 층"}으로 가세요", null, "T4", null, null)
+                "층 기준이 없어요. ${ro(carLabel ?: "기록된 층")} 가세요", null, "T4", null, null)
         val s = g.state(tMs)
         val label = carLabel
-        val fixed = if (label != null && label != s.targetLabel) {
-            s.copy(targetLabel = label, text = s.text.replace(s.targetLabel ?: "\u0000", label))
-        } else s
-        return if (g.calibrated) fixed.copy(ref = "층 직접 지정") else fixed
+        val old = s.targetLabel
+        val fixed = if (label != null && old != null && label != old) {
+            s.copy(targetLabel = label, text = s.text.replace(ro(old), ro(label)).replace(old, label))
+        } else if (label != null && old == null) s.copy(targetLabel = label) else s
+        var out = if (g.calibrated) fixed.copy(ref = "층 직접 지정") else fixed
+        if (g.wantsFloorConfirm()) {
+            val r = g.hRelCar()
+            val guess = if (label != null && r != null) SiteBook.shiftLabel(label, (r / floorH).roundToInt()) else null
+            out = out.copy(askFloor = true, guessLabel = guess)
+        }
+        return out
     }
 
     private fun reselect(tMs: Long) {
