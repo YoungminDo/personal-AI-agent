@@ -14,13 +14,25 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
+import com.parkingmemo.app.TrackerService
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -51,6 +63,18 @@ fun GuideScreen(onFound: () -> Unit, onClose: () -> Unit) {
     BackHandler { onClose() }
 
     val s = state
+    val ctx = LocalContext.current
+    var showCalibrate by remember { mutableStateOf(false) }
+    if (showCalibrate) {
+        CalibrateDialog(
+            carLabel = s?.targetLabel,
+            onConfirm = { current, car ->
+                TrackerService.calibrate(ctx, current, car)
+                showCalibrate = false
+            },
+            onDismiss = { showCalibrate = false },
+        )
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -99,6 +123,11 @@ fun GuideScreen(onFound: () -> Unit, onClose: () -> Unit) {
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.weight(1f))
+        if (s != null && s.mode != GuideMode.CALIBRATING) {
+            TextButton(onClick = { showCalibrate = true }) {
+                Text("층이 맞지 않나요? 지금 층 알려주기", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
         Text(debugLine(s), color = Muted, fontSize = 12.sp, textAlign = TextAlign.Center)
         message?.let { Text(it, color = Muted, fontSize = 12.sp, textAlign = TextAlign.Center) }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -108,6 +137,58 @@ fun GuideScreen(onFound: () -> Unit, onClose: () -> Unit) {
             }
         }
     }
+}
+
+@Composable
+private fun LevelChips(selected: String?, onSelect: (String) -> Unit) {
+    val labels = listOf("B7", "B6", "B5", "B4", "B3", "B2", "B1", "1F", "2F", "3F")
+    Row(
+        Modifier.horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        labels.forEach { l ->
+            val on = l == selected
+            Box(
+                Modifier
+                    .size(52.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(if (on) levelColor(l) else CardBg)
+                    .border(2.dp, if (on) Accent else LineC, RoundedCornerShape(12.dp))
+                    .clickable { onSelect(l) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(l, color = Ink, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+            }
+        }
+    }
+}
+
+/** One-tap fix when the floor count is off: which floor am I on, which floor is the car on. */
+@Composable
+private fun CalibrateDialog(carLabel: String?, onConfirm: (current: String, car: String) -> Unit, onDismiss: () -> Unit) {
+    var car by remember { mutableStateOf(carLabel) }
+    var current by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("지금 몇 층에 있나요?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("기둥이나 벽의 층 표시를 보고 골라주세요", color = Muted, fontSize = 13.sp)
+                LevelChips(current) { current = it }
+                Spacer(Modifier.height(4.dp))
+                Text("차가 있는 층 (틀렸으면 바꿔주세요)", color = Muted, fontSize = 13.sp)
+                LevelChips(car) { car = it }
+            }
+        },
+        confirmButton = {
+            val c = current
+            val k = car
+            TextButton(onClick = { if (c != null && k != null) onConfirm(c, k) }, enabled = c != null && k != null) {
+                Text("맞추기")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("취소") } },
+    )
 }
 
 @Composable

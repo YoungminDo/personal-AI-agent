@@ -57,6 +57,21 @@ class TrackerService : Service(), SensorEventListener {
         const val ACTION_START_GUIDE = "com.parkingmemo.action.START_GUIDE"
         const val ACTION_STOP_GUIDE = "com.parkingmemo.action.STOP_GUIDE"
         const val ACTION_FOUND = "com.parkingmemo.action.FOUND"
+        const val ACTION_CALIBRATE = "com.parkingmemo.action.CALIBRATE"
+        private const val EXTRA_CURRENT = "current"
+        private const val EXTRA_CAR = "car"
+
+        /** The user says which floor they are on and which floor the car is on. */
+        fun calibrate(ctx: Context, current: String, car: String) {
+            val i = Intent(ctx, TrackerService::class.java)
+                .setAction(ACTION_CALIBRATE)
+                .putExtra(EXTRA_CURRENT, current)
+                .putExtra(EXTRA_CAR, car)
+            try {
+                ContextCompat.startForegroundService(ctx, i)
+            } catch (_: Exception) {
+            }
+        }
 
         fun send(ctx: Context, action: String) {
             val i = Intent(ctx, TrackerService::class.java).setAction(action)
@@ -129,6 +144,7 @@ class TrackerService : Service(), SensorEventListener {
             ACTION_START_GUIDE -> startGuide()
             ACTION_STOP_GUIDE -> stopGuide(found = false)
             ACTION_FOUND -> stopGuide(found = true)
+            ACTION_CALIBRATE -> calibrate(intent?.getStringExtra(EXTRA_CURRENT), intent?.getStringExtra(EXTRA_CAR))
             else -> if (pipeline == null && !guiding) shutdown()
         }
         return START_NOT_STICKY
@@ -192,7 +208,26 @@ class TrackerService : Service(), SensorEventListener {
     private fun endWalk() {
         val t = now()
         log?.event(t, "END_WALK")
-        pipeline?.endWalkManually(t)?.let { handle(it) }
+        val p = pipeline ?: return
+        val out = p.endWalkManually(t)
+        if (out != null) handle(out)
+        else if (p.isFinishing) TrackerState.message.value = "도착한 층 높이를 재는 중이에요. 몇 초만 그대로 있어 주세요"
+    }
+
+    private fun calibrate(current: String?, car: String?) {
+        val s = session
+        if (current == null || car == null || s == null) return
+        val rec = guideRec
+        if (rec != null && car != rec.displayLabel) {
+            app.store.setUserLabel(car)
+            TrackerState.recordVersion.value = TrackerState.recordVersion.value + 1
+        }
+        log?.event(now(), "CALIBRATE", "$current/$car")
+        TrackerState.message.value = if (s.calibrate(current, car)) {
+            "지금 $current, 차는 $car 기준으로 다시 안내해요"
+        } else {
+            "층 표시를 읽지 못했어요"
+        }
     }
 
     private fun handle(out: ParkingPipeline.Output) {

@@ -108,7 +108,18 @@ fun HomeScreen(onStartGuide: () -> Unit, onOpenSetup: () -> Unit, onOpenSensors:
             else -> FirstRunCard(onRecordNow = manualPark, onOpenSensors = onOpenSensors)
         }
 
-        message?.let { Text(it, color = Accent, fontSize = 14.sp) }
+        message?.let {
+            Text(
+                it,
+                color = Muted,
+                fontSize = 13.sp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(CardBg)
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+            )
+        }
 
         HorizontalDivider(color = LineC)
         Text("테스트 도구", color = Muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)

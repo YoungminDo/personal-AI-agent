@@ -23,6 +23,7 @@ class Sim(seed: Long = 7, var pHpa: Double = 1012.84, private val pressureOffset
     var t = 0L
         private set
     var gnssGood = true
+    var gnssAccuracy = 5.0
     var heading = 0.0
     var carry = Carry.HAND
     var carryOffset = 0.0
@@ -46,7 +47,7 @@ class Sim(seed: Long = 7, var pHpa: Double = 1012.84, private val pressureOffset
         val s = if (gnssGood) {
             val lat = baseLat + pos.y / 110_540.0
             val lon = baseLon + pos.x / (111_320.0 * cos(Math.toRadians(baseLat)))
-            GnssSample(t, lat, lon, 5.0, 12)
+            GnssSample(t, lat, lon, gnssAccuracy, 12)
         } else {
             GnssSample(t, baseLat, baseLon, 80.0, 1)
         }

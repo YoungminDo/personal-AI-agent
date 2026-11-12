@@ -27,6 +27,10 @@ class ParkingPipeline(
     private val detector = ParkingDetector()
     private var walk: WalkOutBuilder? = null
     private var nowMs = 0L
+    private var pendingEndMs: Long? = null
+
+    /** A manual end was requested and is waiting for the user to stop moving vertically. */
+    val isFinishing: Boolean get() = pendingEndMs != null
 
     val walkProgress: WalkOutBuilder? get() = walk
 
@@ -35,6 +39,7 @@ class ParkingPipeline(
         val wasWalking = phase == Phase.WALK_OUT
         val d = detector.onCarConnected()
         walk = null
+        pendingEndMs = null
         phase = Phase.DRIVING
         return if (wasWalking || d is ParkingDetector.Decision.Cancelled) Output.Cancelled else null
     }
@@ -92,6 +97,9 @@ class ParkingPipeline(
             }
             Phase.WALK_OUT -> {
                 val w = walk ?: return null
+                pendingEndMs?.let { p ->
+                    if (w.readyToFinish(tMs) || tMs - p > 15_000) return finishWalk(tMs, WalkEnd.MANUAL)
+                }
                 val end = w.checkEnd(tMs) ?: return null
                 return finishWalk(tMs, end)
             }
@@ -100,14 +108,19 @@ class ParkingPipeline(
         return null
     }
 
+    /** "I've arrived": finishes now, or a few seconds later if the user is still in a moving lift. */
     fun endWalkManually(tMs: Long): Output? {
         if (phase != Phase.WALK_OUT) return null
-        return finishWalk(tMs, WalkEnd.MANUAL)
+        val w = walk ?: return null
+        if (w.readyToFinish(tMs)) return finishWalk(tMs, WalkEnd.MANUAL)
+        pendingEndMs = tMs
+        return null
     }
 
     private fun finishWalk(tMs: Long, end: WalkEnd): Output {
         val rec = walk!!.finish(tMs, end)
         walk = null
+        pendingEndMs = null
         phase = Phase.IDLE
         return Output.Saved(rec)
     }
@@ -115,6 +128,7 @@ class ParkingPipeline(
     private fun startWalk(originMs: Long, tMs: Long): Output {
         val wallAtOrigin = wallClockMs() - (tMs - originMs)
         walk = WalkOutBuilder(wallAtOrigin, originMs, buffer, stepScale, sites)
+        pendingEndMs = null
         phase = Phase.WALK_OUT
         return Output.WalkStarted(originMs)
     }

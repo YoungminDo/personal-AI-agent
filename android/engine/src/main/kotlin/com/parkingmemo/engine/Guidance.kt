@@ -67,9 +67,27 @@ class Guidance(
     private var alignDone = false
     private var rotationDeg = 0.0
 
-    private val hStartRelCar: Double? = when (ref) {
+    private var hStartRelCar: Double? = when (ref) {
         StartRef.GROUND -> rec.floor.dhGroundM?.let { -it }
         StartRef.WALK_END -> rec.dhEndM
+    }
+
+    /** True once the user told us which floor they are on (overrides both assumptions). */
+    var calibrated = false
+        private set
+
+    /**
+     * The user says they are [levelsAboveCar] floors above the car right now
+     * (negative = below). Replaces the stored reference, so any error in it
+     * (sloped sites, GNSS lingering, a start point elsewhere) is gone from here on.
+     */
+    fun calibrate(levelsAboveCar: Int) {
+        val d = heightFromStart() ?: return
+        hStartRelCar = levelsAboveCar * floorH - d
+        calibrated = true
+        if (levelsAboveCar != 0 && anchored) {
+            anchored = false; pdr = null; wpIdx = 0; alignDone = false; rotationDeg = 0.0
+        }
     }
 
     val isAnchored: Boolean get() = anchored
@@ -130,7 +148,8 @@ class Guidance(
             ?: return memory(label, "층 기준이 없어요. ${label ?: "기록된 층"}으로 가세요", "T4")
 
         if (!anchored) {
-            if (abs(r) >= 0.6 * floorH) {
+            // Half a floor is the boundary between "this floor" and the next one.
+            if (abs(r) >= ARRIVE_FRACTION * floorH) {
                 val n = max(1, (abs(r) / floorH).roundToInt())
                 val down = r > 0
                 val far = abs(r) > 2.5 * floorH
@@ -195,8 +214,8 @@ class Guidance(
 
     private fun updateAnchor(tMs: Long) {
         val r = hRelCar() ?: return
-        val onCarFloor = abs(r) < 0.6 * floorH
         if (anchored) {
+            val onCarFloor = abs(r) < LEAVE_FRACTION * floorH
             // Left the car floor again (e.g. wrong stairs): start over.
             if (!onCarFloor) {
                 if (offFloorSinceMs < 0) offFloorSinceMs = tMs
@@ -206,7 +225,7 @@ class Guidance(
             } else offFloorSinceMs = -1L
             return
         }
-        if (onCarFloor && segmenter.isSettled(tMs, minMs = 1_000)) {
+        if (abs(r) < ARRIVE_FRACTION * floorH && segmenter.isSettled(tMs, minMs = 1_000)) {
             anchored = true
             offFloorSinceMs = -1L
             val p = Pdr(stepScale, rec.gridAngleDeg, tracker = tracker, ownsTracker = false)
@@ -233,6 +252,11 @@ class Guidance(
         GuideState(GuideMode.MEMORY, label, null, null, null, 90.0, text, null, tier, hRelCar(), null, null, refName())
 
     companion object {
+        /** Closer than this fraction of a floor counts as arriving on the car floor. */
+        const val ARRIVE_FRACTION = 0.5
+        /** Once there, leaving needs a bigger change (hysteresis, B20). */
+        const val LEAVE_FRACTION = 0.6
+
         /** Design doc 5.9: faster pulses closer in; a steady search pulse when the estimate is too uncertain. */
         fun beepInterval(distanceM: Double, sigmaM: Double): Double =
             if (sigmaM < 0.5 * distanceM) (0.1 + 0.06 * distanceM).coerceIn(0.15, 2.0) else 1.5
@@ -295,6 +319,22 @@ class GuideSession(
     var switches = 0
         private set
 
+    /** Car floor as corrected by the user during this trip. */
+    var carLabel: String? = rec.displayLabel
+        private set
+
+    /**
+     * "I'm on [currentLabel], the car is on [carLabel]": both start assumptions are
+     * replaced by this one fact. Returns false when a label cannot be read.
+     */
+    fun calibrate(currentLabel: String, carLabel: String): Boolean {
+        val cur = SiteBook.levelIndex(currentLabel) ?: return false
+        val car = SiteBook.levelIndex(carLabel) ?: return false
+        this.carLabel = carLabel
+        all.forEach { it.calibrate(cur - car) }
+        return all.isNotEmpty()
+    }
+
     val isAnchored: Boolean get() = active?.isAnchored == true
 
     fun onPressure(tMs: Long, hPa: Double) {
@@ -332,13 +372,19 @@ class GuideSession(
         val geo = rec.carGeo
         if (rec.carInAnchorFrame == null && rec.anchorMode == null && geo != null) return gnssState(tMs, geo)
         val g = active
-            ?: return GuideState(GuideMode.MEMORY, rec.displayLabel, null, null, null, 90.0,
-                "층 기준이 없어요. ${rec.displayLabel ?: "기록된 층"}으로 가세요", null, "T4", null, null)
-        return g.state(tMs)
+            ?: return GuideState(GuideMode.MEMORY, carLabel, null, null, null, 90.0,
+                "층 기준이 없어요. ${carLabel ?: "기록된 층"}으로 가세요", null, "T4", null, null)
+        val s = g.state(tMs)
+        val label = carLabel
+        val fixed = if (label != null && label != s.targetLabel) {
+            s.copy(targetLabel = label, text = s.text.replace(s.targetLabel ?: "\u0000", label))
+        } else s
+        return if (g.calibrated) fixed.copy(ref = "층 직접 지정") else fixed
     }
 
     private fun reselect(tMs: Long) {
         val a = active ?: return
+        if (a.calibrated) return
         val b = all.firstOrNull { it !== a } ?: return
         val ra = a.hRelCar() ?: return
         val rb = b.hRelCar() ?: return

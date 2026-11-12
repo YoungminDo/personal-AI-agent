@@ -114,6 +114,29 @@ class WalkOutBuilder(
     }
 
     val stepsSoFar: Int get() = pdr.track.size
+
+    /**
+     * False while the user is still moving vertically or has only just stopped.
+     * A manual "I've arrived" waits for this so the arrival height is a settled
+     * plateau, not an average that includes the end of the lift ride.
+     */
+    fun readyToFinish(tMs: Long): Boolean =
+        !segmenter.moving && (segmenter.lastPlateauStartMs < 0 || tMs - segmenter.lastPlateauStartMs >= 2_000)
+
+    /** Pressure of the level the user is on now (since the last vertical move, at most 10 s). */
+    private fun currentPlateauHpa(tMs: Long): Double? {
+        val since = maxOf(tMs - 10_000, segmenter.lastPlateauStartMs)
+        return buf.pressureMedian(since, tMs) ?: buf.pressureMedian(tMs - 3_000, tMs)
+    }
+
+    /** Highest level (lowest pressure) in a window, from 3-second medians. */
+    private fun highestLevelHpa(t0: Long, t1: Long): Double? {
+        val bins = buf.pressure.filter { it.tMs in t0..t1 }
+            .groupBy { (it.tMs - t0) / 3_000 }
+            .values.filter { it.size >= 2 }
+            .map { b -> median(b.map { it.hPa }) }
+        return bins.minOrNull()
+    }
     val segmentsSoFar: List<VerticalSegment> get() = segmenter.segments
 
     fun finish(tMs: Long, end: WalkEnd): ParkingRecord {
@@ -122,16 +145,20 @@ class WalkOutBuilder(
 
         val endHpa = when (end) {
             WalkEnd.STATIONARY -> buf.pressureMedian(lastStepMs + 5_000, lastStepMs + 120_000)
-                ?: buf.pressureMedian(tMs - 10_000, tMs)
+                ?: currentPlateauHpa(tMs)
             WalkEnd.GNSS_OUTDOOR -> buf.pressureMedian(gnssGoodSinceMs ?: (tMs - 10_000), tMs)
-            else -> buf.pressureMedian(tMs - 10_000, tMs)
+            else -> currentPlateauHpa(tMs)
         }
         val dhEnd = if (carHpa != null && endHpa != null) Baro.dhM(carHpa, endHpa) else null
 
-        // Ground reference from the drive in: the last trusted GNSS fix (P4 rewind).
-        val groundFix = buf.lastGoodGnss(originMs)
+        // Ground reference from the drive in (P4 rewind). GNSS chips keep reporting
+        // fixes for a while after entering a ramp (dead reckoning), so the last fix
+        // can already be a level down. Street level is taken as the highest level in
+        // the 40 s before the last trusted fix.
+        val groundFix = buf.gnss.lastOrNull { it.tMs <= originMs && it.good && it.accuracyM <= 12.0 }
+            ?: buf.lastGoodGnss(originMs)
         val dhDrive = if (groundFix != null && carHpa != null) {
-            buf.pressureMedian(groundFix.tMs - 2_000, groundFix.tMs + 2_000)?.let { Baro.dhM(it, carHpa) }
+            highestLevelHpa(groundFix.tMs - 40_000, groundFix.tMs + 2_000)?.let { Baro.dhM(it, carHpa) }
         } else null
         val dhWalk = if (end == WalkEnd.GNSS_OUTDOOR && dhEnd != null) -dhEnd else null
 
