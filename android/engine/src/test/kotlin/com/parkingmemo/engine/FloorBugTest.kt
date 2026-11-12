@@ -149,4 +149,33 @@ class FloorBugTest {
         assertEquals("B4", SiteBook.shiftLabel("B5", 1))
         assertEquals("1F", SiteBook.shiftLabel("B1", 1))
     }
+
+    @Test
+    fun `the floor can be confirmed as soon as the walk starts, and the site remembers it`() {
+        fun parkingUntilWalkStarts(sim: Sim, sites: SiteBook): ParkingPipeline {
+            var t = 0L
+            val p = ParkingPipeline(sites) { t }
+            sim.event("CAR_CONNECTED"); sim.stand(60_000)
+            sim.gnssGood = false; sim.ride(pCar, 50_000); sim.stand(5_000)
+            sim.event("CAR_DISCONNECTED"); sim.walk(4.0, 0.0)
+            for (line in sim.lines) {
+                val f = line.split(',')
+                t = f[1].toLong()
+                when (f[0]) {
+                    "P" -> p.pressure(t, f[2].toDouble())
+                    "S" -> p.step(t)
+                    "G" -> p.gnss(GnssSample(t, f[2].toDouble(), f[3].toDouble(), f[4].toDouble(), f[5].toInt()))
+                    "E" -> if (f[2] == "CAR_CONNECTED") p.carConnected(t) else if (f[2] == "CAR_DISCONNECTED") p.carDisconnected(t)
+                }
+            }
+            return p
+        }
+        val sites = SiteBook()
+        val first = parkingUntilWalkStarts(Sim(seed = 61), sites).walkProgress!!.preview()
+        assertEquals("B3", first.label)
+        // The user answers "B5" (tall retail basements above the garage): the site learns it.
+        sites.addLabel(WalkOutBuilder.siteKeyOf(GnssSample(0, 37.5123, 127.0581, 5.0, 12))!!, first.dhGroundM!!, "B5")
+        val second = parkingUntilWalkStarts(Sim(seed = 62), sites).walkProgress!!.preview()
+        assertEquals("B5", second.label, "next time at the same site: ${second.basis}")
+    }
 }

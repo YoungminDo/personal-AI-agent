@@ -25,6 +25,7 @@ object Notifier {
     private const val CH_PARKED = "parked"
     private const val SAVED_ID = 2
     private const val TAP_ID = 3
+    private const val ASK_ID = 4
 
     fun createChannels(ctx: Context) {
         val nm = ctx.getSystemService(NotificationManager::class.java)
@@ -89,6 +90,41 @@ object Notifier {
             .addAction(0, "차 찾기", find)
             .build()
         NotificationManagerCompat.from(ctx).notify(SAVED_ID, n)
+    }
+
+    /**
+     * "Did you park on B4? [Yes] [B5] [B3]" right after the walk-out starts, while
+     * the floor signs are still in view. Buttons answer without opening the app.
+     */
+    @SuppressLint("MissingPermission")
+    fun askParkedFloor(ctx: Context, guess: String?) {
+        if (!canPost(ctx)) return
+        val b = NotificationCompat.Builder(ctx, CH_EVENTS)
+            .setSmallIcon(R.drawable.ic_stat_parking)
+            .setContentTitle(if (guess != null) "${guess}에 주차했나요?" else "몇 층에 주차했나요?")
+            .setContentText("기둥이나 벽의 층 표시를 보고 눌러주세요")
+            .setAutoCancel(true)
+            .setContentIntent(openApp(ctx))
+        if (guess != null) {
+            b.addAction(0, "맞아요", confirmIntent(ctx, guess))
+            com.parkingmemo.engine.SiteBook.shiftLabel(guess, -1)?.let { b.addAction(0, it, confirmIntent(ctx, it)) }
+            com.parkingmemo.engine.SiteBook.shiftLabel(guess, 1)?.let { b.addAction(0, it, confirmIntent(ctx, it)) }
+        }
+        NotificationManagerCompat.from(ctx).notify(ASK_ID, b.build())
+    }
+
+    fun cancelAskParkedFloor(ctx: Context) {
+        NotificationManagerCompat.from(ctx).cancel(ASK_ID)
+    }
+
+    private fun confirmIntent(ctx: Context, label: String): PendingIntent {
+        val i = Intent(ctx, TrackerService::class.java)
+            .setAction(TrackerService.ACTION_CONFIRM_FLOOR)
+            .putExtra(TrackerService.EXTRA_LABEL, label)
+        return PendingIntent.getForegroundService(
+            ctx, ("confirm" + label).hashCode(), i,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
     }
 
     fun cancelParked(ctx: Context) {

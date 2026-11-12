@@ -123,6 +123,30 @@ class WalkOutBuilder(
     fun readyToFinish(tMs: Long): Boolean =
         !segmenter.moving && (segmenter.lastPlateauStartMs < 0 || tMs - segmenter.lastPlateauStartMs >= 2_000)
 
+    /**
+     * Floor guess available as soon as the walk starts: drive-in depth plus what this
+     * site has learned. Lets the user confirm the floor while still in the garage.
+     */
+    fun preview(): FloorEstimate {
+        val carHpa = buf.pressureMedian(originMs, originMs + 5_000) ?: buf.pressure.lastOrNull()?.hPa
+        val g = groundFix()
+        return FloorEstimator.estimate(driveDh(g, carHpa), null, sites, siteKeyOf(g))
+    }
+
+    /**
+     * Ground reference from the drive in (P4 rewind): the last trusted GNSS fix.
+     * GNSS chips keep reporting fixes for a while after entering a ramp (dead
+     * reckoning), so that fix can already be a level down; see [driveDh].
+     */
+    private fun groundFix(): GnssSample? =
+        buf.gnss.lastOrNull { it.tMs <= originMs && it.good && it.accuracyM <= 12.0 } ?: buf.lastGoodGnss(originMs)
+
+    /** Car height vs street level: street = highest level in the 40 s before the ground fix. */
+    private fun driveDh(groundFix: GnssSample?, carHpa: Double?): Double? {
+        if (groundFix == null || carHpa == null) return null
+        return highestLevelHpa(groundFix.tMs - 40_000, groundFix.tMs + 2_000)?.let { Baro.dhM(it, carHpa) }
+    }
+
     /** Pressure of the level the user is on now (since the last vertical move, at most 10 s). */
     private fun currentPlateauHpa(tMs: Long): Double? {
         val since = maxOf(tMs - 10_000, segmenter.lastPlateauStartMs)
@@ -151,15 +175,8 @@ class WalkOutBuilder(
         }
         val dhEnd = if (carHpa != null && endHpa != null) Baro.dhM(carHpa, endHpa) else null
 
-        // Ground reference from the drive in (P4 rewind). GNSS chips keep reporting
-        // fixes for a while after entering a ramp (dead reckoning), so the last fix
-        // can already be a level down. Street level is taken as the highest level in
-        // the 40 s before the last trusted fix.
-        val groundFix = buf.gnss.lastOrNull { it.tMs <= originMs && it.good && it.accuracyM <= 12.0 }
-            ?: buf.lastGoodGnss(originMs)
-        val dhDrive = if (groundFix != null && carHpa != null) {
-            highestLevelHpa(groundFix.tMs - 40_000, groundFix.tMs + 2_000)?.let { Baro.dhM(it, carHpa) }
-        } else null
+        val groundFix = groundFix()
+        val dhDrive = driveDh(groundFix, carHpa)
         val dhWalk = if (end == WalkEnd.GNSS_OUTDOOR && dhEnd != null) -dhEnd else null
 
         val endFix = buf.gnss.lastOrNull { it.good && it.tMs >= originMs }

@@ -58,6 +58,17 @@ class TrackerService : Service(), SensorEventListener {
         const val ACTION_STOP_GUIDE = "com.parkingmemo.action.STOP_GUIDE"
         const val ACTION_FOUND = "com.parkingmemo.action.FOUND"
         const val ACTION_CALIBRATE = "com.parkingmemo.action.CALIBRATE"
+        const val ACTION_CONFIRM_FLOOR = "com.parkingmemo.action.CONFIRM_FLOOR"
+        const val EXTRA_LABEL = "label"
+
+        /** The user says which floor they parked on (notification button or picker). */
+        fun confirmFloor(ctx: Context, label: String) {
+            val i = Intent(ctx, TrackerService::class.java).setAction(ACTION_CONFIRM_FLOOR).putExtra(EXTRA_LABEL, label)
+            try {
+                ContextCompat.startForegroundService(ctx, i)
+            } catch (_: Exception) {
+            }
+        }
         private const val EXTRA_CURRENT = "current"
         private const val EXTRA_CAR = "car"
 
@@ -109,6 +120,8 @@ class TrackerService : Service(), SensorEventListener {
     private var lastSwitches = 0
     private var lastGuideMode: GuideMode? = null
     private var lastAsk = false
+    /** Floor the user confirmed while the walk-out was still being recorded. */
+    private var pendingUserLabel: String? = null
     private var nextPulseAtMs = 0L
 
     private var rate = Rate.OFF
@@ -146,6 +159,7 @@ class TrackerService : Service(), SensorEventListener {
             ACTION_STOP_GUIDE -> stopGuide(found = false)
             ACTION_FOUND -> stopGuide(found = true)
             ACTION_CALIBRATE -> calibrate(intent?.getStringExtra(EXTRA_CURRENT), intent?.getStringExtra(EXTRA_CAR))
+            ACTION_CONFIRM_FLOOR -> confirmFloor(intent?.getStringExtra(EXTRA_LABEL))
             else -> if (pipeline == null && !guiding) shutdown()
         }
         return START_NOT_STICKY
@@ -168,6 +182,8 @@ class TrackerService : Service(), SensorEventListener {
     private fun carConnected() {
         val t = now()
         if (guiding) stopGuide(found = true, auto = true)
+        pendingUserLabel = null
+        Notifier.cancelAskParkedFloor(this)
         val p = pipeline ?: newPipeline()
         if (log == null) openLog("drive")
         log?.event(t, "CAR_CONNECTED")
@@ -215,6 +231,23 @@ class TrackerService : Service(), SensorEventListener {
         else if (p.isFinishing) TrackerState.message.value = "도착한 층 높이를 재는 중이에요. 몇 초만 그대로 있어 주세요"
     }
 
+    private fun confirmFloor(label: String?) {
+        if (label == null) return
+        Notifier.cancelAskParkedFloor(this)
+        log?.event(now(), "CONFIRM_FLOOR", label)
+        val phase = pipeline?.phase
+        if (phase == ParkingPipeline.Phase.WALK_OUT || phase == ParkingPipeline.Phase.WAITING_WALK) {
+            pendingUserLabel = label
+            TrackerState.message.value = "${label}에 주차한 것으로 기록할게요"
+        } else {
+            app.store.setUserLabel(label)
+            TrackerState.recordVersion.value = TrackerState.recordVersion.value + 1
+            app.store.loadRecord()?.let { Notifier.parked(this, it) }
+            TrackerState.message.value = "${label}(으)로 고쳤어요. 이 주차장은 다음부터 반영돼요"
+            if (pipeline == null && !guiding) shutdown()
+        }
+    }
+
     private fun calibrate(current: String?, car: String?) {
         val s = session
         if (current == null || car == null || s == null) return
@@ -238,11 +271,17 @@ class TrackerService : Service(), SensorEventListener {
                 TrackerState.status.value = TrackerState.Status.WALK_OUT
                 Notifier.updateOngoing(this, "하차 경로를 기록하고 있어요 · 도착하면 완료를 눌러 주세요", endWalk = true)
                 feedback.walkStarted()
+                // Still in the garage: ask for the floor now, while the signs are in view.
+                val guess = pipeline?.walkProgress?.preview()?.label
+                log?.event(now(), "ASK_PARKED_FLOOR", guess ?: "?")
+                Notifier.askParkedFloor(this, guess)
             }
             is ParkingPipeline.Output.Saved -> {
-                val r = out.record
-                app.store.saveRecord(r)
-                log?.event(now(), "SAVED", r.displayLabel ?: "?")
+                app.store.saveRecord(out.record)
+                pendingUserLabel?.let { app.store.setUserLabel(it) }
+                pendingUserLabel = null
+                val r = app.store.loadRecord() ?: out.record
+                log?.event(now(), "SAVED", "${out.record.floor.label ?: "?"}/${r.displayLabel ?: "?"}")
                 closeLog()
                 pipeline = null
                 Notifier.parked(this, r)

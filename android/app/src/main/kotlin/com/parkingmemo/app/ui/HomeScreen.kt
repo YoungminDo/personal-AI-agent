@@ -84,6 +84,7 @@ fun HomeScreen(onStartGuide: () -> Unit, onOpenSetup: () -> Unit, onOpenSensors:
             status == TrackerState.Status.WALK_OUT -> RecordingCard(
                 walkInfo = walkInfo,
                 onDone = { TrackerService.send(ctx, TrackerService.ACTION_END_WALK) },
+                onPickFloor = { showPicker = true },
             )
             status == TrackerState.Status.WAITING_WALK -> InfoCard(
                 title = "차에서 내렸나요?",
@@ -149,9 +150,13 @@ fun HomeScreen(onStartGuide: () -> Unit, onOpenSetup: () -> Unit, onOpenSensors:
         FloorPicker(
             current = record?.displayLabel,
             onPick = {
-                app.store.setUserLabel(it)
-                TrackerState.recordVersion.value = TrackerState.recordVersion.value + 1
-                TrackerState.message.value = "${it}(으)로 고쳤어요. 이 주차장은 다음부터 반영돼요"
+                if (status == TrackerState.Status.WALK_OUT || status == TrackerState.Status.WAITING_WALK) {
+                    TrackerService.confirmFloor(ctx, it)
+                } else {
+                    app.store.setUserLabel(it)
+                    TrackerState.recordVersion.value = TrackerState.recordVersion.value + 1
+                    TrackerState.message.value = "${it}(으)로 고쳤어요. 이 주차장은 다음부터 반영돼요"
+                }
                 showPicker = false
             },
             onDismiss = { showPicker = false },
@@ -197,7 +202,7 @@ private fun FirstRunCard(onRecordNow: () -> Unit, onOpenSensors: () -> Unit) {
 }
 
 @Composable
-private fun RecordingCard(walkInfo: String, onDone: () -> Unit) {
+private fun RecordingCard(walkInfo: String, onDone: () -> Unit, onPickFloor: () -> Unit) {
     ActionCard {
         Text("하차 경로를 기록하고 있어요", color = Ink, fontSize = 19.sp, fontWeight = FontWeight.Bold)
         if (walkInfo.isNotEmpty()) Text(walkInfo, color = Accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
@@ -219,6 +224,9 @@ private fun RecordingCard(walkInfo: String, onDone: () -> Unit) {
             color = Muted,
             fontSize = 13.sp,
         )
+        OutlinedButton(onClick = onPickFloor, modifier = Modifier.fillMaxWidth()) {
+            Text("주차한 층 알려주기")
+        }
     }
 }
 
