@@ -178,7 +178,7 @@ private fun FirstRunCard(onRecordNow: () -> Unit, onOpenSensors: () -> Unit) {
     ActionCard {
         Text("다음 할 일", color = Accent, fontSize = 15.sp, fontWeight = FontWeight.Bold)
         StepLine(1, "센서 확인 (선택)", "엘리베이터를 타면서 높이가 바뀌는지 봐요")
-        StepLine(2, "평소처럼 운전하고 주차하기", "차 블루투스가 끊기고 걷기 시작하면 자동으로 기록돼요")
+        StepLine(2, "평소처럼 운전하고 주차하기", "내려서 몇 걸음 걸으면 '드르륵' 두 번 진동하며 기록을 시작해요")
         StepLine(3, "목적지까지 걸어가기", "도착해서 [도착했어요]를 누르거나, 몇 분 지나면 저장돼요")
         Spacer(Modifier.height(2.dp))
         Text("지금 바로 테스트해 보려면", color = Muted, fontSize = 13.sp)

@@ -1,10 +1,12 @@
 package com.parkingmemo.app
 
 import android.content.Context
+import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.os.Build
 import android.os.SystemClock
+import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -32,6 +34,25 @@ class Feedback(ctx: Context) {
         } catch (_: Exception) {
         }
         if (sound) tone?.startTone(ToneGenerator.TONE_PROP_BEEP, if (strong) 200 else 70)
+    }
+
+    /**
+     * Two firm buzzes when the walk from the car starts being recorded, so the user
+     * knows without looking. Sent as an alarm-class vibration so it is felt in a
+     * pocket and also when the phone is muted.
+     */
+    fun walkStarted() {
+        val v = vibrator ?: return
+        val effect = VibrationEffect.createWaveform(longArrayOf(0, 220, 140, 220), intArrayOf(0, 255, 0, 255), -1)
+        try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                v.vibrate(effect, VibrationAttributes.createForUsage(VibrationAttributes.USAGE_ALARM))
+            } else {
+                @Suppress("DEPRECATION")
+                v.vibrate(effect, AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ALARM).build())
+            }
+        } catch (_: Exception) {
+        }
     }
 
     fun release() {
