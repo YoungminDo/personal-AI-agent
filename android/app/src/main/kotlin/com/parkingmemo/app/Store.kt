@@ -4,6 +4,7 @@ import android.content.Context
 import com.parkingmemo.engine.FloorEstimate
 import com.parkingmemo.engine.LevelLabel
 import com.parkingmemo.engine.ParkingRecord
+import com.parkingmemo.engine.RecordCodec
 import com.parkingmemo.engine.SiteBook
 import com.parkingmemo.engine.Vec2
 import com.parkingmemo.engine.VerticalMode
@@ -12,26 +13,32 @@ import com.parkingmemo.engine.WalkEnd
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.util.zip.ZipEntry
-import java.util.zip.ZipOutputStream
 
 /** On-device storage only (design principle P9): nothing leaves the phone unless the user exports it. */
 class Store(private val ctx: Context) {
-    private val recordFile = File(ctx.filesDir, "last_record.json")
+    // Record text comes from the engine's RecordCodec, so every field is covered by
+    // its round-trip test. last_record.json is only read for records saved by 0.1.x.
+    private val recordFile = File(ctx.filesDir, "last_record.txt")
+    private val legacyRecordFile = File(ctx.filesDir, "last_record.json")
     private val sitesFile = File(ctx.filesDir, "sites.json")
-    private val historyFile = File(ctx.filesDir, "history.jsonl")
+    private val historyFile = File(ctx.filesDir, "history.txt")
     val logsDir: File = File(ctx.filesDir, "logs").apply { mkdirs() }
+    val photosDir: File = File(ctx.filesDir, "photos").apply { mkdirs() }
 
     @Synchronized
     fun saveRecord(r: ParkingRecord, appendHistory: Boolean = true) {
-        val json = RecordJson.toJson(r)
-        recordFile.writeText(json.toString())
-        if (appendHistory) historyFile.appendText(json.toString() + "\n")
+        val text = RecordCodec.encode(r)
+        recordFile.writeText(text)
+        if (appendHistory) historyFile.appendText(text + "\n---\n")
     }
 
     @Synchronized
     fun loadRecord(): ParkingRecord? = try {
-        if (recordFile.exists()) RecordJson.fromJson(JSONObject(recordFile.readText())) else null
+        when {
+            recordFile.exists() -> RecordCodec.decode(recordFile.readText())
+            legacyRecordFile.exists() -> RecordJson.fromJson(JSONObject(legacyRecordFile.readText()))
+            else -> null
+        }
     } catch (e: Exception) {
         null
     }
@@ -67,6 +74,7 @@ class Store(private val ctx: Context) {
     }
 
     /** User says "it was actually B2": fix this record and teach the site (D10). */
+    @Synchronized
     fun setUserLabel(label: String) {
         val r = loadRecord() ?: return
         val site = r.siteKey
@@ -77,28 +85,41 @@ class Store(private val ctx: Context) {
             saveSites(sites)
         }
         saveRecord(r.copy(userLabel = label), appendHistory = false)
-        historyFile.appendText(JSONObject().put("correction", label).put("at", System.currentTimeMillis()).toString() + "\n")
+        historyFile.appendText("correction=$label at=${System.currentTimeMillis()}\n---\n")
     }
 
-    /** Zips logs and state for sharing with the developer. */
-    fun exportZip(): File {
-        val out = File(ctx.cacheDir, "parking-memo-logs.zip")
-        ZipOutputStream(out.outputStream().buffered()).use { zip ->
-            fun add(f: File, name: String) {
+    /** Pillar/zone code and sign photo for the current record. */
+    @Synchronized
+    fun setPillar(code: String?, photoPath: String?) {
+        val r = loadRecord() ?: return
+        saveRecord(r.copy(pillarCode = code ?: r.pillarCode, photoPath = photoPath ?: r.photoPath), appendHistory = false)
+        historyFile.appendText("pillar=${code ?: "-"} at=${System.currentTimeMillis()}\n---\n")
+    }
+
+    /**
+     * One plain-text file with the record, what the sites learned and the most recent
+     * sensor logs, so it can be attached straight to a chat (zip files often cannot).
+     */
+    fun exportText(maxLogs: Int = 6): File {
+        val out = File(ctx.cacheDir, "parking-memo-logs.txt")
+        out.bufferedWriter().use { w ->
+            fun section(name: String, f: File) {
                 if (!f.exists()) return
-                zip.putNextEntry(ZipEntry(name))
-                f.inputStream().use { it.copyTo(zip) }
-                zip.closeEntry()
+                w.write("=== $name ===\n")
+                f.bufferedReader().use { it.copyTo(w) }
+                w.write("\n")
             }
-            add(recordFile, "last_record.json")
-            add(sitesFile, "sites.json")
-            add(historyFile, "history.jsonl")
-            logsDir.listFiles()?.sortedBy { it.name }?.forEach { add(it, "logs/${it.name}") }
+            w.write("# parking-memo export ${System.currentTimeMillis()}\n")
+            section("last_record", recordFile)
+            section("sites", sitesFile)
+            section("history", historyFile)
+            logsDir.listFiles()?.sortedBy { it.name }?.takeLast(maxLogs)?.forEach { section("log ${it.name}", it) }
         }
         return out
     }
 }
 
+/** Reads records saved by 0.1.x as JSON (no longer written). */
 object RecordJson {
     fun toJson(r: ParkingRecord): JSONObject = JSONObject().apply {
         put("parkedAtWallMs", r.parkedAtWallMs)

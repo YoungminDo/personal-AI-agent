@@ -64,6 +64,8 @@ fun GuideScreen(onFound: () -> Unit, onClose: () -> Unit) {
 
     val s = state
     val ctx = LocalContext.current
+    val rec = remember { (ctx.applicationContext as com.parkingmemo.app.ParkingApp).store.loadRecord() }
+    val photo = remember(rec?.photoPath) { loadThumb(rec?.photoPath, 4) }
     var showCalibrate by remember { mutableStateOf(false) }
     if (showCalibrate) {
         CalibrateDialog(
@@ -85,6 +87,9 @@ fun GuideScreen(onFound: () -> Unit, onClose: () -> Unit) {
     ) {
         Spacer(Modifier.height(8.dp))
         FloorBadge(s?.targetLabel, 96.dp)
+        rec?.pillarCode?.let {
+            Text("기둥 $it", color = Accent, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        }
         val togo = s?.floorsToGo
         if (togo != null && togo != 0) {
             Row(
@@ -109,6 +114,13 @@ fun GuideScreen(onFound: () -> Unit, onClose: () -> Unit) {
                         fontSize = 140.sp,
                     )
                     GuideMode.SETTLING, GuideMode.MEMORY -> Text("●", color = Accent, fontSize = 64.sp)
+                    GuideMode.ARRIVE -> if (photo != null) {
+                        androidx.compose.foundation.Image(
+                            photo, contentDescription = "기둥 사진",
+                            modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                        )
+                    } else ArrowDial(s.arrowDeg, s.coneDeg)
                     else -> ArrowDial(s.arrowDeg, s.coneDeg)
                 }
             }
@@ -145,7 +157,7 @@ fun GuideScreen(onFound: () -> Unit, onClose: () -> Unit) {
 }
 
 @Composable
-private fun LevelChips(selected: String?, onSelect: (String) -> Unit) {
+fun LevelChips(selected: String?, onSelect: (String) -> Unit) {
     val labels = listOf("B7", "B6", "B5", "B4", "B3", "B2", "B1", "1F", "2F", "3F")
     Row(
         Modifier.horizontalScroll(rememberScrollState()),

@@ -76,6 +76,7 @@ object Notifier {
         val body = buildString {
             append(time)
             r.floor.dhGroundM?.let { append(" · 지상보다 %.1f m %s".format(abs(it), if (it < 0) "아래" else "위")) }
+            r.pillarCode?.let { append(" · 기둥 $it") }
             r.carInAnchorFrame?.let { append(" · 엘리베이터에서 약 ${it.norm().roundToInt()} m") }
         }
         val find = openApp(ctx, TrackerService.ACTION_START_GUIDE)
@@ -102,9 +103,9 @@ object Notifier {
         val b = NotificationCompat.Builder(ctx, CH_EVENTS)
             .setSmallIcon(R.drawable.ic_stat_parking)
             .setContentTitle(if (guess != null) "${guess}에 주차했나요?" else "몇 층에 주차했나요?")
-            .setContentText("기둥이나 벽의 층 표시를 보고 눌러주세요")
+            .setContentText("기둥 표시를 보고 눌러주세요 · 알림을 누르면 사진으로 기록")
             .setAutoCancel(true)
-            .setContentIntent(openApp(ctx))
+            .setContentIntent(openCapture(ctx))
         if (guess != null) {
             b.addAction(0, "맞아요", confirmIntent(ctx, guess))
             com.parkingmemo.engine.SiteBook.shiftLabel(guess, -1)?.let { b.addAction(0, it, confirmIntent(ctx, it)) }
@@ -115,6 +116,13 @@ object Notifier {
 
     fun cancelAskParkedFloor(ctx: Context) {
         NotificationManagerCompat.from(ctx).cancel(ASK_ID)
+    }
+
+    private fun openCapture(ctx: Context): PendingIntent {
+        val i = Intent(ctx, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            .putExtra(MainActivity.EXTRA_CAPTURE, true)
+        return PendingIntent.getActivity(ctx, "capture".hashCode(), i, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }
 
     private fun confirmIntent(ctx: Context, label: String): PendingIntent {

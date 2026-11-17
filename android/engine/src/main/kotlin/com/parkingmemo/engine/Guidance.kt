@@ -90,7 +90,7 @@ class Guidance(
         hStartRelCar = levelsAboveCar * floorH - d
         calibrated = true
         if (levelsAboveCar != 0 && anchored) {
-            anchored = false; pdr = null; wpIdx = 0; alignDone = false; rotationDeg = 0.0
+            anchored = false; pdr = null; wpIdx = 0; alignDone = false; alignOk = false; rotationDeg = 0.0
         }
     }
 
@@ -196,17 +196,26 @@ class Guidance(
         for (k in wpIdx until wps.lastIndex) remaining += (wps[k + 1] - wps[k]).norm()
         val dCar = (car - u).norm()
         val sigma = 1.5 + 0.05 * (rec.pathLengthM + p.distanceM)
-        val sigmaPsi = if (learned) 8.0 else if (alignDone) 15.0 else 25.0
+        // Field test 3: before the door alignment the stored path can be rotated by
+        // 100+ degrees (compass drift between days, pocket vs hand). No arrow until then.
+        val headingKnown = alignDone && (alignOk || learned)
+        val sigmaPsi = if (learned) 8.0 else if (alignOk) 15.0 else 40.0
         val pointing = tracker.pointing(tMs)
-        val arrow = pointing?.let { angleDiff((target - u).bearingDeg(), it) }
+        val arrow = if (alignDone) pointing?.let { angleDiff((target - u).bearingDeg(), it) } else null
         val cone = (Math.toDegrees(atan(sigma / max(remaining, 0.5))) + sigmaPsi).coerceIn(10.0, 90.0)
-        val beep = beepInterval(remaining, sigma)
+        val beep = if (alignDone) beepInterval(remaining, sigma) else null
         val align = if (alignDone) rotationDeg else null
 
         if (dCar < max(4.0, 1.5 * sigma)) {
             return GuideState(GuideMode.ARRIVE, label, 0, dCar, arrow, cone, "이 근처예요", beep, tier(), r, sigma, align, refName())
         }
-        val (mode, text) = if (wpIdx < wps.lastIndex) {
+        if (!alignDone) {
+            return GuideState(GuideMode.STEP, label, 0, remaining, null, 90.0,
+                "엘리베이터에서 나와 앞으로 몇 걸음 걸어주세요 · 방향을 맞추는 중", null, tier(), r, sigma, null, refName())
+        }
+        val (mode, text) = if (!headingKnown) {
+            GuideMode.VECTOR to "방향이 정확하지 않아요 · 기둥 번호를 확인하세요"
+        } else if (wpIdx < wps.lastIndex) {
             GuideMode.STEP to "${(target - u).norm().roundToInt()} m 간 뒤 ${turnWord(wps, wpIdx)}"
         } else {
             GuideMode.VECTOR to "화살표 방향으로 가세요"
@@ -222,14 +231,18 @@ class Guidance(
     private fun tryAlign(p: Pdr) {
         if (alignDone) return
         val door = rec.doorBearingDeg
-        if (door == null) { alignDone = true; return }
-        if (p.distanceM > 10.0) { alignDone = true; return }
+        if (door == null) { alignDone = true; alignOk = false; return }
+        if (p.distanceM > 10.0) { alignDone = true; alignOk = false; return }
         val disp = p.pos.norm()
         if (disp < 3.0 || disp < 0.8 * p.distanceM) return
         val delta = angleDiff(p.pos.bearingDeg(), door)
         rotationDeg = if (abs(delta) >= 20.0) delta else 0.0
         alignDone = true
+        alignOk = true
     }
+
+    /** True when the door alignment actually measured the frame (not skipped). */
+    private var alignOk = false
 
     private fun updateAnchor(tMs: Long) {
         val r = hRelCar() ?: return
@@ -239,7 +252,7 @@ class Guidance(
             if (!onCarFloor) {
                 if (offFloorSinceMs < 0) offFloorSinceMs = tMs
                 if (tMs - offFloorSinceMs > 5_000) {
-                    anchored = false; pdr = null; wpIdx = 0; alignDone = false; rotationDeg = 0.0
+                    anchored = false; pdr = null; wpIdx = 0; alignDone = false; alignOk = false; rotationDeg = 0.0
                 }
             } else offFloorSinceMs = -1L
             return

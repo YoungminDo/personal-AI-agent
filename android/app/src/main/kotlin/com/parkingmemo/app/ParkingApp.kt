@@ -48,4 +48,6 @@ object TrackerState {
     val walkInfo = MutableStateFlow("")
     val message = MutableStateFlow<String?>(null)
     val recordVersion = MutableStateFlow(0)
+    /** Set when a notification asks to photograph the floor sign. */
+    val captureRequest = MutableStateFlow(false)
 }

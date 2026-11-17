@@ -28,6 +28,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -45,6 +46,7 @@ import com.parkingmemo.app.ParkingApp
 import com.parkingmemo.app.TrackerService
 import com.parkingmemo.app.TrackerState
 import com.parkingmemo.engine.ParkingRecord
+import com.parkingmemo.engine.SignInfo
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -68,6 +70,18 @@ fun HomeScreen(onStartGuide: () -> Unit, onOpenSetup: () -> Unit, onOpenSensors:
     var showPicker by remember { mutableStateOf(false) }
     var soundOn by remember { mutableStateOf(app.prefs.soundOn) }
     val manualPark = { TrackerService.send(ctx, TrackerService.ACTION_MANUAL_PARK) }
+    var signResult by remember { mutableStateOf<Pair<SignInfo, String>?>(null) }
+    val captureSign = rememberSignCapture(
+        onResult = { info, path -> signResult = info to path },
+        onError = { TrackerState.message.value = it },
+    )
+    val captureRequested by TrackerState.captureRequest.collectAsState()
+    LaunchedEffect(captureRequested) {
+        if (captureRequested) {
+            TrackerState.captureRequest.value = false
+            captureSign()
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -85,6 +99,7 @@ fun HomeScreen(onStartGuide: () -> Unit, onOpenSetup: () -> Unit, onOpenSensors:
                 walkInfo = walkInfo,
                 onDone = { TrackerService.send(ctx, TrackerService.ACTION_END_WALK) },
                 onPickFloor = { showPicker = true },
+                onPhoto = captureSign,
             )
             status == TrackerState.Status.WAITING_WALK -> InfoCard(
                 title = "차에서 내렸나요?",
@@ -95,7 +110,7 @@ fun HomeScreen(onStartGuide: () -> Unit, onOpenSetup: () -> Unit, onOpenSensors:
                 body = "주차하고 내려서 걸어가면 자동으로 기록해요. 아무것도 누르지 않아도 돼요.",
             )
             record != null -> {
-                RecordCard(record, onEditFloor = { showPicker = true })
+                RecordCard(record, onEditFloor = { showPicker = true }, onPhoto = captureSign)
                 Button(
                     onClick = onStartGuide,
                     modifier = Modifier
@@ -162,6 +177,18 @@ fun HomeScreen(onStartGuide: () -> Unit, onOpenSetup: () -> Unit, onOpenSensors:
             onDismiss = { showPicker = false },
         )
     }
+
+    signResult?.let { (info, path) ->
+        SignResultDialog(
+            info = info,
+            photoPath = path,
+            onSave = { floor, pillar ->
+                TrackerService.confirmFloor(ctx, floor, pillar, path)
+                signResult = null
+            },
+            onDismiss = { signResult = null },
+        )
+    }
 }
 
 /** Highlighted card: the one thing to do now. */
@@ -202,7 +229,7 @@ private fun FirstRunCard(onRecordNow: () -> Unit, onOpenSensors: () -> Unit) {
 }
 
 @Composable
-private fun RecordingCard(walkInfo: String, onDone: () -> Unit, onPickFloor: () -> Unit) {
+private fun RecordingCard(walkInfo: String, onDone: () -> Unit, onPickFloor: () -> Unit, onPhoto: () -> Unit) {
     ActionCard {
         Text("하차 경로를 기록하고 있어요", color = Ink, fontSize = 19.sp, fontWeight = FontWeight.Bold)
         if (walkInfo.isNotEmpty()) Text(walkInfo, color = Accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
@@ -224,9 +251,10 @@ private fun RecordingCard(walkInfo: String, onDone: () -> Unit, onPickFloor: () 
             color = Muted,
             fontSize = 13.sp,
         )
-        OutlinedButton(onClick = onPickFloor, modifier = Modifier.fillMaxWidth()) {
-            Text("주차한 층 알려주기")
+        OutlinedButton(onClick = onPhoto, modifier = Modifier.fillMaxWidth()) {
+            Text("기둥 사진으로 층·번호 기록")
         }
+        TextButton(onClick = onPickFloor) { Text("사진 없이 층만 고르기") }
     }
 }
 
@@ -259,8 +287,9 @@ private fun StepLine(n: Int, title: String, desc: String) {
 }
 
 @Composable
-private fun RecordCard(r: ParkingRecord, onEditFloor: () -> Unit) {
+private fun RecordCard(r: ParkingRecord, onEditFloor: () -> Unit, onPhoto: () -> Unit) {
     val time = SimpleDateFormat("M월 d일 HH:mm", Locale.KOREA).format(Date(r.parkedAtWallMs))
+    val thumb = remember(r.photoPath) { loadThumb(r.photoPath, 8) }
     Column(
         Modifier
             .fillMaxWidth()
@@ -274,6 +303,7 @@ private fun RecordCard(r: ParkingRecord, onEditFloor: () -> Unit) {
             Spacer(Modifier.width(16.dp))
             Column(Modifier.weight(1f)) {
                 Text(time, color = Ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                r.pillarCode?.let { Text("기둥 $it", color = Accent, fontSize = 17.sp, fontWeight = FontWeight.Bold) }
                 r.floor.dhGroundM?.let {
                     Text("지상보다 %.1f m %s".format(abs(it), if (it < 0) "아래" else "위"), color = Muted, fontSize = 14.sp)
                 }
@@ -294,13 +324,29 @@ private fun RecordCard(r: ParkingRecord, onEditFloor: () -> Unit) {
             color = Muted,
             fontSize = 12.sp,
         )
-        Text(
-            "층이 틀렸나요? 눌러서 고치기",
-            color = Accent,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.clickable(onClick = onEditFloor),
-        )
+        thumb?.let {
+            androidx.compose.foundation.Image(
+                it, contentDescription = "기둥 사진",
+                modifier = Modifier.fillMaxWidth().height(140.dp).clip(RoundedCornerShape(10.dp)),
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text(
+                "층이 틀렸나요? 고치기",
+                color = Accent,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.clickable(onClick = onEditFloor),
+            )
+            Text(
+                if (r.photoPath == null) "기둥 사진 찍기" else "사진 다시 찍기",
+                color = Accent,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.clickable(onClick = onPhoto),
+            )
+        }
     }
 }
 
@@ -339,10 +385,10 @@ private fun appVersion(ctx: Context): String = try {
 
 private fun shareLogs(ctx: Context, app: ParkingApp) {
     try {
-        val zip = app.store.exportZip()
-        val uri = FileProvider.getUriForFile(ctx, ctx.packageName + ".files", zip)
+        val file = app.store.exportText()
+        val uri = FileProvider.getUriForFile(ctx, ctx.packageName + ".files", file)
         val send = Intent(Intent.ACTION_SEND)
-            .setType("application/zip")
+            .setType("text/plain")
             .putExtra(Intent.EXTRA_STREAM, uri)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         ctx.startActivity(Intent.createChooser(send, "기록 파일 보내기"))

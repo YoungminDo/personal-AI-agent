@@ -60,10 +60,13 @@ class TrackerService : Service(), SensorEventListener {
         const val ACTION_CALIBRATE = "com.parkingmemo.action.CALIBRATE"
         const val ACTION_CONFIRM_FLOOR = "com.parkingmemo.action.CONFIRM_FLOOR"
         const val EXTRA_LABEL = "label"
+        private const val EXTRA_PILLAR = "pillar"
+        private const val EXTRA_PHOTO = "photo"
 
-        /** The user says which floor they parked on (notification button or picker). */
-        fun confirmFloor(ctx: Context, label: String) {
-            val i = Intent(ctx, TrackerService::class.java).setAction(ACTION_CONFIRM_FLOOR).putExtra(EXTRA_LABEL, label)
+        /** The user says which floor they parked on (button, picker, or sign photo). */
+        fun confirmFloor(ctx: Context, label: String?, pillar: String? = null, photoPath: String? = null) {
+            val i = Intent(ctx, TrackerService::class.java).setAction(ACTION_CONFIRM_FLOOR)
+                .putExtra(EXTRA_LABEL, label).putExtra(EXTRA_PILLAR, pillar).putExtra(EXTRA_PHOTO, photoPath)
             try {
                 ContextCompat.startForegroundService(ctx, i)
             } catch (_: Exception) {
@@ -122,6 +125,8 @@ class TrackerService : Service(), SensorEventListener {
     private var lastAsk = false
     /** Floor the user confirmed while the walk-out was still being recorded. */
     private var pendingUserLabel: String? = null
+    private var pendingPillar: String? = null
+    private var pendingPhoto: String? = null
     private var nextPulseAtMs = 0L
 
     private var rate = Rate.OFF
@@ -159,7 +164,11 @@ class TrackerService : Service(), SensorEventListener {
             ACTION_STOP_GUIDE -> stopGuide(found = false)
             ACTION_FOUND -> stopGuide(found = true)
             ACTION_CALIBRATE -> calibrate(intent?.getStringExtra(EXTRA_CURRENT), intent?.getStringExtra(EXTRA_CAR))
-            ACTION_CONFIRM_FLOOR -> confirmFloor(intent?.getStringExtra(EXTRA_LABEL))
+            ACTION_CONFIRM_FLOOR -> confirmFloor(
+                intent?.getStringExtra(EXTRA_LABEL),
+                intent?.getStringExtra(EXTRA_PILLAR),
+                intent?.getStringExtra(EXTRA_PHOTO),
+            )
             else -> if (pipeline == null && !guiding) shutdown()
         }
         return START_NOT_STICKY
@@ -183,6 +192,8 @@ class TrackerService : Service(), SensorEventListener {
         val t = now()
         if (guiding) stopGuide(found = true, auto = true)
         pendingUserLabel = null
+        pendingPillar = null
+        pendingPhoto = null
         Notifier.cancelAskParkedFloor(this)
         val p = pipeline ?: newPipeline()
         if (log == null) openLog("drive")
@@ -231,19 +242,26 @@ class TrackerService : Service(), SensorEventListener {
         else if (p.isFinishing) TrackerState.message.value = "도착한 층 높이를 재는 중이에요. 몇 초만 그대로 있어 주세요"
     }
 
-    private fun confirmFloor(label: String?) {
-        if (label == null) return
+    private fun confirmFloor(label: String?, pillar: String?, photo: String?) {
+        if (label == null && pillar == null && photo == null) {
+            if (pipeline == null && !guiding) shutdown()
+            return
+        }
         Notifier.cancelAskParkedFloor(this)
-        log?.event(now(), "CONFIRM_FLOOR", label)
+        log?.event(now(), "CONFIRM_FLOOR", "${label ?: "-"}/${pillar ?: "-"}")
+        val what = listOfNotNull(label, pillar?.let { "기둥 $it" }).joinToString(" · ")
         val phase = pipeline?.phase
         if (phase == ParkingPipeline.Phase.WALK_OUT || phase == ParkingPipeline.Phase.WAITING_WALK) {
-            pendingUserLabel = label
-            TrackerState.message.value = "${label}에 주차한 것으로 기록할게요"
+            if (label != null) pendingUserLabel = label
+            if (pillar != null) pendingPillar = pillar
+            if (photo != null) pendingPhoto = photo
+            TrackerState.message.value = "$what(으)로 기록할게요"
         } else {
-            app.store.setUserLabel(label)
+            if (label != null) app.store.setUserLabel(label)
+            if (pillar != null || photo != null) app.store.setPillar(pillar, photo)
             TrackerState.recordVersion.value = TrackerState.recordVersion.value + 1
             app.store.loadRecord()?.let { Notifier.parked(this, it) }
-            TrackerState.message.value = "${label}(으)로 고쳤어요. 이 주차장은 다음부터 반영돼요"
+            TrackerState.message.value = "$what(으)로 저장했어요. 이 주차장은 다음부터 반영돼요"
             if (pipeline == null && !guiding) shutdown()
         }
     }
@@ -279,7 +297,10 @@ class TrackerService : Service(), SensorEventListener {
             is ParkingPipeline.Output.Saved -> {
                 app.store.saveRecord(out.record)
                 pendingUserLabel?.let { app.store.setUserLabel(it) }
+                if (pendingPillar != null || pendingPhoto != null) app.store.setPillar(pendingPillar, pendingPhoto)
                 pendingUserLabel = null
+                pendingPillar = null
+                pendingPhoto = null
                 val r = app.store.loadRecord() ?: out.record
                 log?.event(now(), "SAVED", "${out.record.floor.label ?: "?"}/${r.displayLabel ?: "?"}")
                 closeLog()

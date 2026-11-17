@@ -38,6 +38,10 @@ data class ParkingRecord(
     val doorBearingDeg: Double? = null,
     /** GNSS position of the car when it was parked in the open (F05). */
     val carGeo: GeoFix? = null,
+    /** Pillar or zone code from the sign photo, e.g. "나4" or "C-17". */
+    val pillarCode: String? = null,
+    /** Local path of the sign photo (app storage). */
+    val photoPath: String? = null,
 ) {
     val displayLabel: String? get() = userLabel ?: floor.label
 }

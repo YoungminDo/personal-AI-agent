@@ -28,6 +28,7 @@ import com.parkingmemo.app.TrackerState
 class MainActivity : ComponentActivity() {
     companion object {
         const val EXTRA_ACTION = "tracker_action"
+        const val EXTRA_CAPTURE = "capture_sign"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -60,6 +61,10 @@ class MainActivity : ComponentActivity() {
 
     /** A notification asked for a tap because Android blocked a background start. */
     private fun handle(i: Intent?) {
+        if (i?.getBooleanExtra(EXTRA_CAPTURE, false) == true) {
+            i.removeExtra(EXTRA_CAPTURE)
+            TrackerState.captureRequest.value = true
+        }
         val action = i?.getStringExtra(EXTRA_ACTION) ?: return
         i.removeExtra(EXTRA_ACTION)
         TrackerService.send(this, action)
@@ -76,6 +81,11 @@ fun AppRoot() {
     val status by TrackerState.status.collectAsState()
     var wasGuiding by remember { mutableStateOf(false) }
 
+    val captureRequested by TrackerState.captureRequest.collectAsState()
+    LaunchedEffect(captureRequested) {
+        // The camera flow lives on the home screen.
+        if (captureRequested && (screen == Screen.SETUP || screen == Screen.SENSORS)) screen = Screen.HOME
+    }
     LaunchedEffect(status) {
         if (status == TrackerState.Status.GUIDING) {
             screen = Screen.GUIDE

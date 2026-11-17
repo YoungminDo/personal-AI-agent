@@ -63,4 +63,6 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // On-device sign reading (Korean + Latin), bundled so it works without Play services downloads.
+    implementation("com.google.mlkit:text-recognition-korean:16.0.1")
 }
